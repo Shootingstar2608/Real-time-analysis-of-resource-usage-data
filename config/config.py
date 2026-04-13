@@ -25,30 +25,20 @@ SPARK_CHECKPOINT_DIR = "/tmp/spark-checkpoints"
 # ============================================
 # DATA CONFIGURATION
 # ============================================
-DATA_DIR = "data/raw"
-PROCESSED_DATA_DIR = "data/processed"
+DATA_DIR = "data/alibaba"
+PROCESSED_DATA_DIR = "data/alibaba"
 MODEL_DIR = "models/saved"
 
-# Azure VM Trace - Real Data Columns (no header in files)
-# cpu_readings: 5 cols → timestamp_s, vm_id, min_cpu, max_cpu, avg_cpu
-# vmtable: 11 cols → vm_id, sub_id, deploy_id, created, deleted,
-#                     max_cpu, avg_cpu, p95_cpu, category, cores, memory
-CPU_READINGS_COLUMNS = [
-    "timestamp", "vm_id", "min_cpu", "max_cpu", "avg_cpu"
-]
-VMTABLE_COLUMNS = [
-    "vm_id", "subscription_id", "deployment_id",
-    "timestamp_vm_created", "timestamp_vm_deleted",
-    "max_cpu_lifetime", "avg_cpu_lifetime", "p95_cpu_lifetime",
-    "vm_category", "vm_core_count", "vm_memory_gb"
+# Alibaba machine_usage columns (no header in files)
+MACHINE_USAGE_COLUMNS = [
+    "machine_id", "time_stamp", "cpu_util_percent", "mem_util_percent",
+    "mem_gps", "mkpi", "net_in", "net_out", "disk_io_percent"
 ]
 
-# Enriched record columns (after join cpu_readings + vmtable)
-ENRICHED_COLUMNS = [
-    "timestamp", "vm_id", "min_cpu", "max_cpu", "avg_cpu",
-    "cpu_range", "vm_category", "vm_core_count", "vm_memory_gb",
-    "ingestion_timestamp"
-]
+# Backward-compatible aliases used by older pipeline code.
+CPU_READINGS_COLUMNS = MACHINE_USAGE_COLUMNS
+VMTABLE_COLUMNS = []
+ENRICHED_COLUMNS = MACHINE_USAGE_COLUMNS + ["ingestion_timestamp", "source_file"]
 
 # ============================================
 # ML MODEL CONFIGURATION

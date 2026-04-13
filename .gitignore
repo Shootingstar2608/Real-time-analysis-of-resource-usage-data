@@ -1,8 +1,5 @@
-# Raw dataset files (too large to push)
-data/raw/
-
-# Processed data
-data/processed/
+data/
+output/
 
 # Python
 __pycache__/

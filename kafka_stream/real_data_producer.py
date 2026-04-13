@@ -1,12 +1,11 @@
 """
 Real Data Kafka Producer
-Đọc trực tiếp file .csv.gz (Azure VM Traces) → enrich với vmtable → đẩy vào Kafka.
+Đọc trực tiếp machine_usage data (.csv hoặc .csv.gz) và đẩy vào Kafka.
 Không cần qua bước prepare_data trung gian.
 
 Schema thực tế:
-  cpu_readings: timestamp_s, vm_id, min_cpu, max_cpu, avg_cpu  (5 cột, không header)
-  vmtable:      vm_id, sub_id, deploy_id, created, deleted,
-                max_cpu, avg_cpu, p95_cpu, category, cores, memory  (11 cột, không header)
+    machine_usage: machine_id, time_stamp, cpu_util_percent, mem_util_percent,
+                                 mem_gps, mkpi, net_in, net_out, disk_io_percent
 
 Usage:
   python kafka_stream/real_data_producer.py
@@ -25,12 +24,12 @@ import signal
 import logging
 import argparse
 from datetime import datetime
-from collections import defaultdict
 
 from kafka import KafkaProducer
 from kafka.errors import KafkaError, NoBrokersAvailable
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from config.config import (
     KAFKA_BOOTSTRAP_SERVERS,
     KAFKA_TOPIC_CPU,
@@ -49,77 +48,29 @@ logger = logging.getLogger(__name__)
 # Graceful shutdown
 running = True
 
+
 def signal_handler(sig, frame):
     global running
     logger.info("\n⏹ Đang dừng producer...")
     running = False
 
+
 signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
 
 
-# ============================================
-# VM TABLE LOADER
-# ============================================
-def load_vm_table(raw_dir):
-    """
-    Load vmtable.csv.gz để enrich CPU readings với metadata.
-    Trả về dict: vm_id → {category, core_count, memory_gb}
+def _to_float_or_none(value):
+    value = value.strip()
+    if value == "":
+        return None
+    return float(value)
 
-    vmtable schema (11 cột, không header):
-      0: encrypted_vm_id
-      1: encrypted_subscription_id
-      2: encrypted_deployment_id
-      3: timestamp_vm_created
-      4: timestamp_vm_deleted
-      5: max_cpu (lifetime)
-      6: avg_cpu (lifetime)
-      7: p95_cpu (lifetime)
-      8: vm_category (Interactive / Delay-insensitive / Unknown)
-      9: vm_virtual_core_count_bucket
-     10: vm_memory_bucket (GB)
-    """
-    vmtable_path = os.path.join(raw_dir, "vmtable.csv.gz")
 
-    if not os.path.exists(vmtable_path):
-        logger.warning(f"vmtable.csv.gz không tìm thấy tại {vmtable_path}")
-        logger.warning("Producer sẽ chạy không có metadata VM")
-        return {}
-
-    logger.info(f"📋 Đang load vmtable từ {vmtable_path}...")
-    vm_lookup = {}
-    count = 0
-
-    with gzip.open(vmtable_path, 'rt', encoding='utf-8') as f:
-        reader = csv.reader(f)
-        for row in reader:
-            if len(row) < 11:
-                continue
-            vm_id = row[0].strip()
-            try:
-                vm_lookup[vm_id] = {
-                    'vm_category': row[8].strip() if row[8].strip() else 'Unknown',
-                    'vm_core_count': int(row[9]) if row[9].strip() else 0,
-                    'vm_memory_gb': int(row[10]) if row[10].strip() else 0,
-                }
-            except (ValueError, IndexError):
-                vm_lookup[vm_id] = {
-                    'vm_category': 'Unknown',
-                    'vm_core_count': 0,
-                    'vm_memory_gb': 0,
-                }
-            count += 1
-
-    logger.info(f"  ✅ Loaded {count:,} VMs vào lookup table")
-
-    # Thống kê
-    categories = defaultdict(int)
-    for info in vm_lookup.values():
-        categories[info['vm_category']] += 1
-    for cat, cnt in sorted(categories.items(), key=lambda x: -x[1]):
-        logger.info(f"     {cat}: {cnt:,}")
-
-    return vm_lookup
+def _to_int_or_none(value):
+    value = value.strip()
+    if value == "":
+        return None
+    return int(float(value))
 
 
 # ============================================
@@ -127,8 +78,7 @@ def load_vm_table(raw_dir):
 # ============================================
 class RealDataProducer:
     """
-    Producer đọc trực tiếp từ file .csv.gz và đẩy vào Kafka.
-    Mỗi record được enrich với vmtable metadata trước khi gửi.
+    Producer đọc trực tiếp từ machine_usage files và đẩy vào Kafka.
     """
 
     def __init__(self, bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
@@ -136,8 +86,6 @@ class RealDataProducer:
         self.speed_factor = speed_factor
         self.total_sent = 0
         self.total_errors = 0
-        self.total_enriched = 0
-        self.total_not_enriched = 0
 
         # Retry connecting to Kafka
         for attempt in range(1, max_retries + 1):
@@ -178,30 +126,39 @@ class RealDataProducer:
             if self.total_errors % 1000 == 1:
                 logger.error(f"Kafka send error: {e}")
 
-    def stream_from_raw_files(self, raw_dir, vm_lookup,
-                               batch_size=500, max_records=None):
+    def stream_from_raw_files(self, raw_dir, batch_size=500, max_records=None):
         """
-        Đọc file cpu_readings .csv.gz → enrich → gửi Kafka.
+        Đọc machine_usage files (.csv/.csv.gz) và gửi Kafka.
 
-        cpu_readings schema (5 cột, không header):
-          0: timestamp (giây, relative, mỗi 300s = 5 phút)
-          1: encrypted_vm_id
-          2: min_cpu (%)
-          3: max_cpu (%)
-          4: avg_cpu (%)
+        machine_usage schema (9 cột, không header):
+          0: machine_id
+          1: time_stamp
+          2: cpu_util_percent
+          3: mem_util_percent
+          4: mem_gps
+          5: mkpi
+          6: net_in
+          7: net_out
+          8: disk_io_percent
         """
         global running
 
-        # Tìm tất cả cpu_readings files
-        pattern = os.path.join(raw_dir, "vm_cpu_readings-*.csv.gz")
-        cpu_files = sorted(glob.glob(pattern))
+        patterns = [
+            os.path.join(raw_dir, "machine_usage-*.csv.gz"),
+            os.path.join(raw_dir, "machine_usage*.csv"),
+            os.path.join(raw_dir, "machine_usage*.csv.gz"),
+        ]
+        usage_files = []
+        for pattern in patterns:
+            usage_files.extend(glob.glob(pattern))
+        usage_files = sorted(set(usage_files))
 
-        if not cpu_files:
-            logger.error(f"❌ Không tìm thấy file cpu_readings tại {raw_dir}")
+        if not usage_files:
+            logger.error(f"❌ Không tìm thấy file machine_usage tại {raw_dir}")
             logger.info("Download trước: bash data/download_data.sh")
             return
 
-        logger.info(f"📂 Tìm thấy {len(cpu_files)} file CPU readings")
+        logger.info(f"📂 Tìm thấy {len(usage_files)} file machine_usage")
         if max_records:
             logger.info(f"🔢 Giới hạn: {max_records:,} records")
 
@@ -209,65 +166,60 @@ class RealDataProducer:
         batch_count = 0
         records_in_batch = 0
 
-        for file_idx, gz_file in enumerate(cpu_files):
+        for file_idx, data_file in enumerate(usage_files):
             if not running:
                 break
 
-            filename = os.path.basename(gz_file)
+            filename = os.path.basename(data_file)
             logger.info(
-                f"\n📄 [{file_idx+1}/{len(cpu_files)}] Streaming {filename}..."
+                f"\n📄 [{file_idx+1}/{len(usage_files)}] Streaming {filename}..."
             )
 
             try:
-                with gzip.open(gz_file, 'rt', encoding='utf-8') as f:
+                opener = gzip.open if data_file.endswith(".gz") else open
+                with opener(data_file, 'rt', encoding='utf-8') as f:
                     reader = csv.reader(f)
 
                     for row in reader:
                         if not running:
                             break
 
-                        if len(row) < 5:
+                        if len(row) < 9:
                             continue
 
-                        # Parse CPU readings
+                        # Parse machine_usage row
                         try:
-                            timestamp_s = float(row[0])
-                            vm_id = row[1].strip()
-                            min_cpu = float(row[2])
-                            max_cpu = float(row[3])
-                            avg_cpu = float(row[4])
+                            machine_id = row[0].strip()
+                            time_stamp = float(row[1])
+                            cpu_util_percent = _to_int_or_none(row[2])
+                            mem_util_percent = _to_int_or_none(row[3])
+                            mem_gps = _to_float_or_none(row[4])
+                            mkpi = _to_int_or_none(row[5])
+                            net_in = _to_float_or_none(row[6])
+                            net_out = _to_float_or_none(row[7])
+                            disk_io_percent = _to_float_or_none(row[8])
                         except (ValueError, IndexError):
                             continue
 
-                        # Tạo record cơ bản
+                        # Record đúng schema machine_usage
                         record = {
-                            'timestamp': timestamp_s,
-                            'vm_id': vm_id,
-                            'min_cpu': round(min_cpu, 4),
-                            'max_cpu': round(max_cpu, 4),
-                            'avg_cpu': round(avg_cpu, 4),
-                            'cpu_range': round(max_cpu - min_cpu, 4),
+                            'machine_id': machine_id,
+                            'time_stamp': time_stamp,
+                            'cpu_util_percent': cpu_util_percent,
+                            'mem_util_percent': mem_util_percent,
+                            'mem_gps': mem_gps,
+                            'mkpi': mkpi,
+                            'net_in': net_in,
+                            'net_out': net_out,
+                            'disk_io_percent': disk_io_percent,
                         }
-
-                        # Enrich với vmtable metadata
-                        vm_info = vm_lookup.get(vm_id)
-                        if vm_info:
-                            record['vm_category'] = vm_info['vm_category']
-                            record['vm_core_count'] = vm_info['vm_core_count']
-                            record['vm_memory_gb'] = vm_info['vm_memory_gb']
-                            self.total_enriched += 1
-                        else:
-                            record['vm_category'] = 'Unknown'
-                            record['vm_core_count'] = 0
-                            record['vm_memory_gb'] = 0
-                            self.total_not_enriched += 1
 
                         # Thêm metadata ingestion
                         record['ingestion_timestamp'] = datetime.now().isoformat()
                         record['source_file'] = filename
 
                         # Gửi vào Kafka
-                        self.send_record(KAFKA_TOPIC_CPU, vm_id, record)
+                        self.send_record(KAFKA_TOPIC_CPU, machine_id, record)
                         records_in_batch += 1
 
                         # Flush theo batch
@@ -289,8 +241,7 @@ class RealDataProducer:
                             logger.info(
                                 f"  📊 Sent: {self.total_sent:,} | "
                                 f"Errors: {self.total_errors:,} | "
-                                f"Rate: {rate:,.0f} msg/s | "
-                                f"Enriched: {self.total_enriched:,}"
+                                f"Rate: {rate:,.0f} msg/s"
                             )
 
                         # Kiểm tra giới hạn
@@ -317,8 +268,6 @@ class RealDataProducer:
         logger.info("=" * 60)
         logger.info(f"  Total sent:        {self.total_sent:,}")
         logger.info(f"  Total errors:      {self.total_errors:,}")
-        logger.info(f"  Enriched (vmtable):{self.total_enriched:,}")
-        logger.info(f"  Not enriched:      {self.total_not_enriched:,}")
         logger.info(f"  Duration:          {elapsed:.1f}s")
         logger.info(f"  Avg rate:          {rate:,.0f} msg/s")
         logger.info(f"  Batches flushed:   {batch_count:,}")
@@ -336,7 +285,7 @@ class RealDataProducer:
 # ============================================
 def main():
     parser = argparse.ArgumentParser(
-        description='Real Data Kafka Producer - Azure VM Traces → Kafka'
+        description='Real Data Kafka Producer - machine_usage → Kafka'
     )
     parser.add_argument(
         '--speed', type=int, default=200,
@@ -362,7 +311,7 @@ def main():
 
     logger.info("=" * 60)
     logger.info("  🚀 REAL DATA KAFKA PRODUCER")
-    logger.info("  Azure VM Traces → Kafka")
+    logger.info("  machine_usage → Kafka")
     logger.info("=" * 60)
     logger.info(f"  Data dir:    {raw_dir}")
     logger.info(f"  Speed:       {args.speed}x")
@@ -372,17 +321,13 @@ def main():
     logger.info(f"  Topic:       {KAFKA_TOPIC_CPU}")
     logger.info("")
 
-    # 1. Load VM metadata
-    vm_lookup = load_vm_table(raw_dir)
-
-    # 2. Tạo producer
+    # 1. Tạo producer
     producer = RealDataProducer(speed_factor=args.speed)
 
-    # 3. Stream data
+    # 2. Stream data
     try:
         producer.stream_from_raw_files(
             raw_dir=raw_dir,
-            vm_lookup=vm_lookup,
             batch_size=args.batch_size,
             max_records=args.max_records,
         )
