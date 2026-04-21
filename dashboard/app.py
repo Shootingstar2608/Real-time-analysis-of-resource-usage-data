@@ -20,7 +20,8 @@ from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config.config import DASHBOARD_PORT, DASHBOARD_REFRESH_INTERVAL
+from config.config import DASHBOARD_PORT, DASHBOARD_REFRESH_INTERVAL, DATA_DIR, ALIBABA_DATA_DIR
+from data.dataset_utils import detect_dataset_type, records_to_dataframe
 
 # ============================================
 # PAGE CONFIG
@@ -37,91 +38,53 @@ st.set_page_config(
 # ============================================
 @st.cache_data(ttl=5)
 def load_ml_results():
-    """Load ML inference results from Parquet output"""
-    parquet_dir = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "output", "ml_results"
-    )
-    
-    if not os.path.exists(parquet_dir):
-        return None
-    
-    parquet_files = glob.glob(os.path.join(parquet_dir, "*.parquet"))
+    """Load ML inference results from Parquet output."""
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    candidate_dirs = [
+        os.path.join(project_root, "output", "ml_results_lstm"),
+        os.path.join(project_root, "output", "ml_results"),
+    ]
+
+    parquet_files = []
+    for parquet_dir in candidate_dirs:
+        if os.path.exists(parquet_dir):
+            parquet_files.extend(glob.glob(os.path.join(parquet_dir, "*.parquet")))
+            parquet_files.extend(glob.glob(os.path.join(parquet_dir, "**", "*.parquet"), recursive=True))
+
+    parquet_files = sorted(set(parquet_files))
     if not parquet_files:
         return None
-    
-    dfs = [pd.read_parquet(f) for f in parquet_files[-10:]]  # last 10 files
+
+    dfs = [pd.read_parquet(f) for f in parquet_files[-10:]]
     df = pd.concat(dfs, ignore_index=True)
-    df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
-    return df.sort_values('timestamp')
+    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce", unit="s")
+    return df.sort_values("timestamp")
 
 
 @st.cache_data(ttl=60)
 def load_processed_data():
-    """Load raw Azure data for historical view"""
-    import gzip, csv
-    data_dir = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "data", "raw"
-    )
-    
-    cpu_files = sorted(glob.glob(os.path.join(data_dir, "vm_cpu_readings-*.csv.gz")))
-    if not cpu_files:
-        return None
-    
-    # Load first file, sample for performance
-    records = []
-    max_records = 100_000
-    
-    # Load vmtable for enrichment
-    vm_lookup = {}
-    vmtable_path = os.path.join(data_dir, "vmtable.csv.gz")
-    if os.path.exists(vmtable_path):
-        with gzip.open(vmtable_path, 'rt') as f:
-            reader = csv.reader(f)
-            for row in reader:
-                if len(row) >= 11:
-                    vm_id = row[0].strip()
-                    try:
-                        vm_lookup[vm_id] = {
-                            'vm_category': row[8].strip() or 'Unknown',
-                            'vm_core_count': int(row[9]) if row[9].strip() else 0,
-                            'vm_memory_gb': int(row[10]) if row[10].strip() else 0,
-                        }
-                    except (ValueError, IndexError):
-                        pass
-    
-    with gzip.open(cpu_files[0], 'rt') as f:
-        reader = csv.reader(f)
-        for row in reader:
-            if len(row) < 5:
-                continue
+    """Load a normalized raw snapshot from Azure or Alibaba data."""
+    candidate_dirs = [DATA_DIR, ALIBABA_DATA_DIR]
+    data_dir = None
+    dataset = None
+
+    for cdir in candidate_dirs:
+        if os.path.exists(cdir):
             try:
-                vm_id = row[1].strip()
-                min_cpu = float(row[2])
-                max_cpu = float(row[3])
-                avg_cpu = float(row[4])
-                vm_info = vm_lookup.get(vm_id, {})
-                records.append({
-                    'timestamp': float(row[0]),
-                    'vm_id': vm_id,
-                    'min_cpu': min_cpu,
-                    'max_cpu': max_cpu,
-                    'avg_cpu': avg_cpu,
-                    'cpu_range': max_cpu - min_cpu,
-                    'vm_category': vm_info.get('vm_category', 'Unknown'),
-                    'vm_core_count': vm_info.get('vm_core_count', 0),
-                    'vm_memory_gb': vm_info.get('vm_memory_gb', 0),
-                })
-                if len(records) >= max_records:
-                    break
-            except (ValueError, IndexError):
+                dataset = detect_dataset_type(cdir)
+                data_dir = cdir
+                break
+            except Exception:
                 continue
-    
-    if not records:
+
+    if data_dir is None:
         return None
-    
-    df = pd.DataFrame(records)
+
+    df = records_to_dataframe(data_dir=data_dir, dataset=dataset, max_records=100_000)
+    if df.empty:
+        return None
+
+    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce", unit="s")
     return df
 
 

@@ -82,8 +82,15 @@ CPU_SCHEMA = StructType([
     StructField("vm_category", StringType(), True),
     StructField("vm_core_count", IntegerType(), True),
     StructField("vm_memory_gb", IntegerType(), True),
+    StructField("avg_memory", DoubleType(), True),
+    StructField("network_in_mbps", DoubleType(), True),
+    StructField("network_out_mbps", DoubleType(), True),
+    StructField("disk_io_percent", DoubleType(), True),
+    StructField("mem_gps", DoubleType(), True),
+    StructField("mkpi", DoubleType(), True),
     StructField("ingestion_timestamp", StringType(), True),
     StructField("source_file", StringType(), True),
+    StructField("data_source", StringType(), True),
 ])
 
 
@@ -340,8 +347,15 @@ def process_batch_with_lstm(batch_df, batch_id):
         "vm_category",
         "vm_core_count",
         "vm_memory_gb",
+        "avg_memory",
+        "network_in_mbps",
+        "network_out_mbps",
+        "disk_io_percent",
+        "mem_gps",
+        "mkpi",
         "ingestion_timestamp",
         "source_file",
+        "data_source",
         "event_time",
     ]
 

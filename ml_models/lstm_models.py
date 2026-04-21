@@ -10,6 +10,7 @@ import glob
 import gzip
 import pickle
 import logging
+import argparse
 from copy import deepcopy
 
 import numpy as np
@@ -33,6 +34,13 @@ from config.config import (
     FORECAST_HIDDEN_SIZE,
     FORECAST_EPOCHS,
     MODEL_DIR,
+    DATA_DIR,
+    ALIBABA_DATA_DIR,
+)
+from data.dataset_utils import (
+    detect_dataset_type,
+    load_aggregated_series_by_timestamp,
+    select_feature_columns,
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -373,9 +381,9 @@ class ResourceForecaster:
     Predicts future CPU usage for capacity planning.
     """
 
-    def __init__(self, target="avg_cpu"):
+    def __init__(self, target="avg_cpu", feature_cols=None):
         self.target = target
-        self.feature_cols = ["min_cpu", "max_cpu", "avg_cpu", "cpu_range"]
+        self.feature_cols = list(feature_cols) if feature_cols is not None else ["min_cpu", "max_cpu", "avg_cpu", "cpu_range"]
         self.scaler_x = MinMaxScaler()
         self.scaler_y = MinMaxScaler()
         self.model = None
@@ -730,114 +738,25 @@ def visualize_lstm_results(
 
 
 # ================================================================
-# DATA LOADING
+# DATA LOADING / TRAINING ENTRYPOINT
 # ================================================================
-from collections import defaultdict
 
-def load_global_aggregated_series(raw_dir, target_unique_timestamps=None):
-    """
-    Load Azure CPU files and directly aggregate by timestamp.
 
-    We stop when we have enough UNIQUE timestamps, not enough rows.
-    This is much better for Colab because the Azure files are ordered
-    by time and each timestamp may contain a huge number of VMs.
-    """
+def load_global_aggregated_series(raw_dir, dataset="auto", target_unique_timestamps=None, max_records=None):
+    """Dataset-agnostic aggregated time series loader."""
     if target_unique_timestamps is None:
-        target_unique_timestamps = max(
-            LSTM_SEQUENCE_LENGTH + FORECAST_HORIZON + 20,
-            50
-        )
+        target_unique_timestamps = max(LSTM_SEQUENCE_LENGTH + FORECAST_HORIZON + 20, 50)
 
-    patterns = [
-        os.path.join(raw_dir, "vm_cpu_readings-file-*-of-195.csv.gz"),
-        os.path.join(raw_dir, "vm_cpu_readings-*.csv.gz"),
-    ]
-
-    cpu_files = []
-    for pattern in patterns:
-        cpu_files.extend(glob.glob(pattern))
-
-    cpu_files = sorted(set(cpu_files))
-    if not cpu_files:
-        raise FileNotFoundError("No CPU reading files found in data/raw/")
-
-    logger.info(
-        f"Found {len(cpu_files)} CPU file(s). "
-        f"Reading until {target_unique_timestamps} unique timestamps..."
+    df = load_aggregated_series_by_timestamp(
+        data_dir=raw_dir,
+        dataset=dataset,
+        target_unique_timestamps=target_unique_timestamps,
+        max_records=max_records,
     )
-
-    # aggregate sums/counts per timestamp
-    agg = {}
-    unique_ts_count = 0
-
-    for file_path in cpu_files:
-        logger.info(f"Scanning {os.path.basename(file_path)}...")
-
-        with gzip.open(file_path, "rt") as f:
-            reader = csv.reader(f)
-
-            for row in reader:
-                if len(row) < 5:
-                    continue
-
-                try:
-                    ts = float(row[0])
-                    min_cpu = float(row[2])
-                    max_cpu = float(row[3])
-                    avg_cpu = float(row[4])
-                    cpu_range = max_cpu - min_cpu
-                except (ValueError, IndexError):
-                    continue
-
-                # new timestamp encountered
-                if ts not in agg:
-                    if unique_ts_count >= target_unique_timestamps:
-                        # enough timestamps collected, stop immediately
-                        rows = []
-                        for timestamp, stats in agg.items():
-                            cnt = stats["count"]
-                            rows.append({
-                                "timestamp": timestamp,
-                                "vm_id": "GLOBAL",
-                                "min_cpu": stats["min_cpu_sum"] / cnt,
-                                "max_cpu": stats["max_cpu_sum"] / cnt,
-                                "avg_cpu": stats["avg_cpu_sum"] / cnt,
-                                "cpu_range": stats["cpu_range_sum"] / cnt,
-                            })
-
-                        df = pd.DataFrame(rows).sort_values("timestamp").reset_index(drop=True)
-                        return df
-
-                    agg[ts] = {
-                        "min_cpu_sum": 0.0,
-                        "max_cpu_sum": 0.0,
-                        "avg_cpu_sum": 0.0,
-                        "cpu_range_sum": 0.0,
-                        "count": 0,
-                    }
-                    unique_ts_count += 1
-
-                agg[ts]["min_cpu_sum"] += min_cpu
-                agg[ts]["max_cpu_sum"] += max_cpu
-                agg[ts]["avg_cpu_sum"] += avg_cpu
-                agg[ts]["cpu_range_sum"] += cpu_range
-                agg[ts]["count"] += 1
-
-    # build dataframe if files ended before target reached
-    rows = []
-    for timestamp, stats in agg.items():
-        cnt = stats["count"]
-        rows.append({
-            "timestamp": timestamp,
-            "vm_id": "GLOBAL",
-            "min_cpu": stats["min_cpu_sum"] / cnt,
-            "max_cpu": stats["max_cpu_sum"] / cnt,
-            "avg_cpu": stats["avg_cpu_sum"] / cnt,
-            "cpu_range": stats["cpu_range_sum"] / cnt,
-        })
-
-    df = pd.DataFrame(rows).sort_values("timestamp").reset_index(drop=True)
+    if df.empty:
+        raise ValueError(f"No normalized records could be loaded from {raw_dir}")
     return df
+
 
 def select_training_vm(df):
     """Pick a VM with enough records for both autoencoder and forecasting."""
@@ -852,24 +771,35 @@ def select_training_vm(df):
         return vm_counts.index[0]
 
     raise ValueError("No VM records available for training.")
-def train_all_models():
-    """Train both LSTM models and generate visualizations."""
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    raw_dir = os.path.join(project_root, "data", "raw")
 
-    # Read by UNIQUE TIMESTAMPS, not by raw row count
+
+def train_all_models(dataset="auto", data_dir=None, target_unique_timestamps=None, max_records=None):
+    """Train both LSTM models and generate visualizations."""
+    if data_dir is None:
+        if dataset == "alibaba":
+            data_dir = ALIBABA_DATA_DIR
+        elif dataset == "azure":
+            data_dir = DATA_DIR
+        else:
+            data_dir = ALIBABA_DATA_DIR if os.path.exists(ALIBABA_DATA_DIR) else DATA_DIR
+
+    resolved_dataset = detect_dataset_type(data_dir) if dataset == "auto" else dataset
+
     agg_df = load_global_aggregated_series(
-        raw_dir,
-        target_unique_timestamps=max(
-            LSTM_SEQUENCE_LENGTH + FORECAST_HORIZON + 20,
-            50
-        )
+        data_dir,
+        dataset=resolved_dataset,
+        target_unique_timestamps=target_unique_timestamps,
+        max_records=max_records,
     )
 
     if agg_df.empty:
         raise ValueError("Aggregated dataframe is empty.")
 
+    feature_cols = select_feature_columns(agg_df)
+    logger.info(f"Resolved dataset: {resolved_dataset}")
+    logger.info(f"Training data directory: {data_dir}")
     logger.info(f"Global aggregated time-series length: {len(agg_df):,}")
+    logger.info(f"Selected feature columns: {feature_cols}")
 
     min_required_ae = LSTM_SEQUENCE_LENGTH
     min_required_fc = LSTM_SEQUENCE_LENGTH + FORECAST_HORIZON
@@ -880,17 +810,15 @@ def train_all_models():
             f"Need at least {min_required_ae}, got {len(agg_df)}."
         )
 
-    # ---- Model 1: LSTM Autoencoder ----
     logger.info("\n" + "=" * 50)
     logger.info("  Training LSTM Autoencoder")
     logger.info("=" * 50)
 
-    ae_detector = AnomalyDetectorLSTM()
-    ae_errors = ae_detector.fit(agg_df, epochs=LSTM_EPOCHS)
+    ae_detector = AnomalyDetectorLSTM(feature_columns=feature_cols)
+    ae_detector.fit(agg_df, epochs=LSTM_EPOCHS)
     ae_anomalies, ae_test_errors = ae_detector.predict(agg_df)
     ae_detector.save()
 
-    # ---- Model 2: LSTM Forecaster ----
     logger.info("\n" + "=" * 50)
     logger.info("  Training LSTM Forecaster (CPU)")
     logger.info("=" * 50)
@@ -899,7 +827,7 @@ def train_all_models():
     forecast_preds = np.array([])
 
     if len(agg_df) >= min_required_fc + 5:
-        forecaster = ResourceForecaster(target="avg_cpu")
+        forecaster = ResourceForecaster(target="avg_cpu", feature_cols=feature_cols)
         X_val, y_val = forecaster.fit(agg_df, epochs=FORECAST_EPOCHS)
         forecaster.save()
 
@@ -919,7 +847,6 @@ def train_all_models():
             "Skipping forecaster training."
         )
 
-    # ---- Visualization ----
     visualize_lstm_results(
         df=agg_df,
         anomalies=ae_anomalies,
@@ -931,5 +858,23 @@ def train_all_models():
     )
 
     logger.info("\n[DONE] All LSTM models trained and saved!")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Train LSTM models on Azure or Alibaba traces")
+    parser.add_argument("--dataset", choices=["auto", "azure", "alibaba"], default="auto")
+    parser.add_argument("--data-dir", type=str, default=None)
+    parser.add_argument("--target-unique-timestamps", type=int, default=None)
+    parser.add_argument("--max-records", type=int, default=None)
+    args = parser.parse_args()
+
+    train_all_models(
+        dataset=args.dataset,
+        data_dir=args.data_dir,
+        target_unique_timestamps=args.target_unique_timestamps,
+        max_records=args.max_records,
+    )
+
+
 if __name__ == "__main__":
-    train_all_models()
+    main()

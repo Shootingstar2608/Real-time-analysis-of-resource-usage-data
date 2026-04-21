@@ -34,8 +34,10 @@ SPARK_CHECKPOINT_DIR = os.path.join(PROJECT_ROOT, "tmp", "spark-checkpoints")
 # ============================================
 DATA_DIR = os.path.join(PROJECT_ROOT, "data", "raw")
 PROCESSED_DATA_DIR = os.path.join(PROJECT_ROOT, "data", "processed")
+ALIBABA_DATA_DIR = os.path.join(PROJECT_ROOT, "data", "alibaba")
 MODEL_DIR = os.path.join(PROJECT_ROOT, "models", "saved")
 OUTPUT_DIR = os.path.join(PROJECT_ROOT, "output")
+DEFAULT_DATASET = os.environ.get("RESOURCE_DATASET", "auto")
 
 # Azure VM Trace - Real Data Columns (no header in files)
 # cpu_readings: 5 cols → timestamp_s, vm_id, min_cpu, max_cpu, avg_cpu
@@ -74,8 +76,15 @@ ENRICHED_COLUMNS = [
     "vm_category",
     "vm_core_count",
     "vm_memory_gb",
+    "avg_memory",
+    "network_in_mbps",
+    "network_out_mbps",
+    "disk_io_percent",
+    "mem_gps",
+    "mkpi",
     "ingestion_timestamp",
     "source_file",
+    "data_source",
 ]
 
 # ============================================
