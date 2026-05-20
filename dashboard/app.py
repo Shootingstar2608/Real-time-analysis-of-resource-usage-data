@@ -1,6 +1,6 @@
 """
 Real-time Dashboard - Streamlit App
-Visualizes streaming results: anomalies, metrics, forecasts.
+Visualizes streaming results: anomalies, metrics (CPU, RAM, Disk).
 
 Run: streamlit run dashboard/app.py
 """
@@ -10,6 +10,8 @@ import sys
 import json
 import time
 import glob
+import tarfile
+import csv
 import logging
 import numpy as np
 import pandas as pd
@@ -18,6 +20,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
+from io import TextIOWrapper
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config.config import DASHBOARD_PORT, DASHBOARD_REFRESH_INTERVAL
@@ -46,99 +49,64 @@ def load_ml_results():
     if not os.path.exists(parquet_dir):
         return None
     
-    parquet_files = glob.glob(os.path.join(parquet_dir, "*.parquet"))
+    parquet_files = sorted(glob.glob(os.path.join(parquet_dir, "*.parquet")))
     if not parquet_files:
         return None
     
-    dfs = [pd.read_parquet(f) for f in parquet_files[-10:]]  # last 10 files
+    # Load last 20 batch files
+    dfs = [pd.read_parquet(f) for f in parquet_files[-20:]]
     df = pd.concat(dfs, ignore_index=True)
-    df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
-    return df.sort_values('timestamp')
+    return df
 
 
-@st.cache_data(ttl=60)
-def load_processed_data():
-    """Load raw Azure data for historical view"""
-    import gzip, csv
-    data_dir = os.path.join(
+@st.cache_data(ttl=120)
+def load_historical_data(max_records=200_000):
+    """Load raw Alibaba data from .tar.gz for historical view"""
+    tar_gz_path = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "data", "raw"
+        "data", "alibaba", "machine_usage.tar.gz"
     )
     
-    cpu_files = sorted(glob.glob(os.path.join(data_dir, "vm_cpu_readings-*.csv.gz")))
-    if not cpu_files:
+    if not os.path.exists(tar_gz_path):
         return None
     
-    # Load first file, sample for performance
     records = []
-    max_records = 100_000
     
-    # Load vmtable for enrichment
-    vm_lookup = {}
-    vmtable_path = os.path.join(data_dir, "vmtable.csv.gz")
-    if os.path.exists(vmtable_path):
-        with gzip.open(vmtable_path, 'rt') as f:
-            reader = csv.reader(f)
+    with tarfile.open(tar_gz_path, 'r:gz') as tar:
+        for member in tar.getmembers():
+            if not member.isfile():
+                continue
+            f = tar.extractfile(member)
+            if f is None:
+                continue
+            
+            text_stream = TextIOWrapper(f, encoding='utf-8')
+            reader = csv.reader(text_stream)
+            
             for row in reader:
-                if len(row) >= 11:
-                    vm_id = row[0].strip()
-                    try:
-                        vm_lookup[vm_id] = {
-                            'vm_category': row[8].strip() or 'Unknown',
-                            'vm_core_count': int(row[9]) if row[9].strip() else 0,
-                            'vm_memory_gb': int(row[10]) if row[10].strip() else 0,
-                        }
-                    except (ValueError, IndexError):
-                        pass
-    
-    with gzip.open(cpu_files[0], 'rt') as f:
-        reader = csv.reader(f)
-        for row in reader:
-            if len(row) < 5:
-                continue
-            try:
-                vm_id = row[1].strip()
-                min_cpu = float(row[2])
-                max_cpu = float(row[3])
-                avg_cpu = float(row[4])
-                vm_info = vm_lookup.get(vm_id, {})
-                records.append({
-                    'timestamp': float(row[0]),
-                    'vm_id': vm_id,
-                    'min_cpu': min_cpu,
-                    'max_cpu': max_cpu,
-                    'avg_cpu': avg_cpu,
-                    'cpu_range': max_cpu - min_cpu,
-                    'vm_category': vm_info.get('vm_category', 'Unknown'),
-                    'vm_core_count': vm_info.get('vm_core_count', 0),
-                    'vm_memory_gb': vm_info.get('vm_memory_gb', 0),
-                })
-                if len(records) >= max_records:
-                    break
-            except (ValueError, IndexError):
-                continue
+                if len(row) < 9:
+                    continue
+                try:
+                    records.append({
+                        'machine_id': row[0].strip(),
+                        'timestamp': float(row[1]) if row[1] else 0.0,
+                        'cpu_util_percent': float(row[2]) if row[2] else 0.0,
+                        'mem_util_percent': float(row[3]) if row[3] else 0.0,
+                        'disk_io_percent': float(row[8]) if row[8] else 0.0,
+                    })
+                    if len(records) >= max_records:
+                        break
+                except (ValueError, IndexError):
+                    continue
+            
+            text_stream.close()
+            if len(records) >= max_records:
+                break
     
     if not records:
         return None
     
-    df = pd.DataFrame(records)
-    return df
-
-
-@st.cache_data(ttl=60)
-def load_training_plots():
-    """Load saved plot images from ML training"""
-    plot_dir = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "output", "plots"
-    )
-    
-    plots = {}
-    for name in ["isolation_forest_analysis.png", "lstm_analysis.png"]:
-        path = os.path.join(plot_dir, name)
-        if os.path.exists(path):
-            plots[name] = path
-    return plots
+    return pd.DataFrame(records)
 
 
 # ============================================
@@ -152,15 +120,19 @@ auto_refresh = st.sidebar.checkbox("Auto-refresh", value=True)
 
 page = st.sidebar.radio(
     "📄 Navigation",
-    ["🏠 Overview", "🔍 Anomaly Detection", "📈 Forecasting", 
-     "📊 VM Analytics", "🤖 ML Model Results"]
+    ["🏠 Overview", "🔍 Anomaly Detection", "📊 Machine Analytics", "🤖 ML Model Results"]
 )
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("""
 ### 🏗️ Architecture
 ```
-Data → Kafka → Spark → ML → Dashboard
+Alibaba Data (.tar.gz)
+  → Kafka Producer
+    → Kafka Broker
+      → Spark Streaming
+        → Isolation Forest
+          → Dashboard
 ```
 """)
 
@@ -169,9 +141,9 @@ Data → Kafka → Spark → ML → Dashboard
 # ============================================
 if page == "🏠 Overview":
     st.title("📊 Real-time Resource Usage Monitor")
-    st.markdown("**Azure VM Traces | Kafka + Spark + ML/DL Pipeline**")
+    st.markdown("**Alibaba Cluster Trace V2018 | Kafka + Spark + ML Pipeline**")
     
-    df = load_processed_data()
+    df = load_historical_data()
     ml_df = load_ml_results()
     
     if df is not None:
@@ -179,322 +151,307 @@ if page == "🏠 Overview":
         col1, col2, col3, col4, col5 = st.columns(5)
         
         with col1:
-            st.metric("Total VMs", f"{df['vm_id'].nunique():,}")
+            st.metric("Total Machines", f"{df['machine_id'].nunique():,}")
         with col2:
-            st.metric("Avg CPU %", f"{df['avg_cpu'].mean():.1f}%")
+            st.metric("Avg CPU %", f"{df['cpu_util_percent'].mean():.1f}%")
         with col3:
-            st.metric("Max CPU %", f"{df['max_cpu'].mean():.1f}%")
+            st.metric("Avg RAM %", f"{df['mem_util_percent'].mean():.1f}%")
         with col4:
-            high_cpu = (df['avg_cpu'] > 80).mean() * 100
-            st.metric("High CPU Rate", f"{high_cpu:.1f}%")
+            st.metric("Avg Disk IO %", f"{df['disk_io_percent'].mean():.1f}%")
         with col5:
             st.metric("Total Records", f"{len(df):,}")
         
         st.markdown("---")
         
-        # CPU distribution over time
+        # Multi-metric distribution
         col_left, col_right = st.columns(2)
         
         with col_left:
-            st.subheader("CPU Usage Distribution")
+            st.subheader("Resource Usage Distribution")
             sample = df.sample(min(5000, len(df)))
-            fig = px.scatter(
-                sample, x='timestamp', y='avg_cpu', color='vm_category',
-                opacity=0.4, title="CPU Usage by VM Category",
-                labels={'avg_cpu': 'Average CPU %', 'timestamp': 'Time (s)'}
-            )
-            fig.add_hline(y=80, line_dash="dash", line_color="red",
-                         annotation_text="High CPU Threshold")
+            fig = go.Figure()
+            fig.add_trace(go.Histogram(x=sample['cpu_util_percent'], name='CPU %',
+                                        opacity=0.7, marker_color='#636EFA'))
+            fig.add_trace(go.Histogram(x=sample['mem_util_percent'], name='RAM %',
+                                        opacity=0.7, marker_color='#EF553B'))
+            fig.add_trace(go.Histogram(x=sample['disk_io_percent'], name='Disk IO %',
+                                        opacity=0.7, marker_color='#00CC96'))
+            fig.update_layout(barmode='overlay', title="CPU / RAM / Disk Distribution",
+                            xaxis_title="Usage %", yaxis_title="Count")
             st.plotly_chart(fig, use_container_width=True)
         
         with col_right:
-            st.subheader("CPU Range (Volatility)")
+            st.subheader("CPU vs RAM Correlation")
             fig = px.scatter(
-                sample, x='timestamp', y='cpu_range', color='vm_category',
-                opacity=0.4, title="CPU Volatility by VM Category",
-                labels={'cpu_range': 'CPU Range (Max-Min)', 'timestamp': 'Time (s)'}
+                sample, x='cpu_util_percent', y='mem_util_percent',
+                color='disk_io_percent', opacity=0.4,
+                title="CPU vs RAM (color = Disk IO)",
+                labels={'cpu_util_percent': 'CPU %', 'mem_util_percent': 'RAM %',
+                        'disk_io_percent': 'Disk IO %'},
+                color_continuous_scale='YlOrRd'
             )
             st.plotly_chart(fig, use_container_width=True)
         
-        # VM Category Distribution
-        col_a, col_b = st.columns(2)
+        # Time series
+        st.subheader("Resource Usage Over Time (sampled)")
+        # Group by timestamp buckets for time series
+        ts_sample = df.sample(min(20000, len(df))).sort_values('timestamp')
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=ts_sample['timestamp'], y=ts_sample['cpu_util_percent'],
+                                mode='markers', name='CPU %', opacity=0.3, marker=dict(size=2)))
+        fig.add_trace(go.Scatter(x=ts_sample['timestamp'], y=ts_sample['mem_util_percent'],
+                                mode='markers', name='RAM %', opacity=0.3, marker=dict(size=2)))
+        fig.add_trace(go.Scatter(x=ts_sample['timestamp'], y=ts_sample['disk_io_percent'],
+                                mode='markers', name='Disk IO %', opacity=0.3, marker=dict(size=2)))
+        fig.add_hline(y=90, line_dash="dash", line_color="red",
+                     annotation_text="High Threshold (90%)")
+        fig.update_layout(xaxis_title="Timestamp (s)", yaxis_title="Usage %",
+                         title="Multi-Metric Usage Over Time")
+        st.plotly_chart(fig, use_container_width=True)
         
-        with col_a:
-            st.subheader("VM Category Distribution")
-            cat_counts = df['vm_category'].value_counts()
-            fig = px.pie(values=cat_counts.values, names=cat_counts.index,
-                        title="VM Categories")
-            st.plotly_chart(fig, use_container_width=True)
-        
-        with col_b:
-            st.subheader("CPU Usage by Category")
-            cat_stats = df.groupby('vm_category').agg({
-                'avg_cpu': 'mean',
-                'max_cpu': 'mean',
-                'cpu_range': 'mean',
-            }).round(2)
-            fig = px.bar(cat_stats, barmode='group',
-                        title="Avg CPU Metrics by Category")
-            st.plotly_chart(fig, use_container_width=True)
+        # ML results summary
+        if ml_df is not None and 'is_anomaly_ai' in ml_df.columns:
+            st.markdown("---")
+            st.subheader("🤖 AI Anomaly Summary (Latest Batches)")
+            col_a, col_b, col_c = st.columns(3)
+            with col_a:
+                st.metric("Records Analyzed", f"{len(ml_df):,}")
+            with col_b:
+                anomaly_count = ml_df['is_anomaly_ai'].sum()
+                st.metric("AI Anomalies", f"{int(anomaly_count):,}")
+            with col_c:
+                rate = anomaly_count / len(ml_df) * 100 if len(ml_df) > 0 else 0
+                st.metric("Anomaly Rate", f"{rate:.2f}%")
     else:
-        st.warning("⚠️ No data found. Download Azure VM Traces first.")
-        st.code("bash data/download_data.sh")
+        st.warning("⚠️ No data found. Download Alibaba dataset first.")
+        st.code("wget -c http://aliopentrace.oss-cn-beijing.aliyuncs.com/v2018Traces/machine_usage.tar.gz -P data/alibaba/")
 
 
 # ============================================
 # PAGE: ANOMALY DETECTION
 # ============================================
 elif page == "🔍 Anomaly Detection":
-    st.title("🔍 Anomaly Detection")
+    st.title("🔍 Anomaly Detection (AI + Rule-based)")
     
-    df = load_processed_data()
     ml_df = load_ml_results()
     
-    data = ml_df if ml_df is not None else df
-    
-    if data is not None and 'is_anomaly' in data.columns:
+    if ml_df is not None and 'is_anomaly_ai' in ml_df.columns:
         # Anomaly summary
-        col1, col2, col3 = st.columns(3)
-        anomalies = data[data['is_anomaly'] == True]
-        
+        col1, col2, col3, col4 = st.columns(4)
+        anomalies = ml_df[ml_df['is_anomaly_ai'] == True]
+
         with col1:
-            st.metric("🚨 Total Anomalies", f"{len(anomalies):,}")
+            st.metric("🚨 IF Anomalies", f"{int(ml_df.get('is_anomaly_if', ml_df['is_anomaly_ai']).sum()):,}")
         with col2:
-            st.metric("Anomaly Rate", 
-                      f"{len(anomalies)/len(data)*100:.2f}%")
+            n_lstm = int(ml_df['is_anomaly_lstm'].sum()) if 'is_anomaly_lstm' in ml_df.columns else 'N/A'
+            st.metric("🔵 LSTM Anomalies", f"{n_lstm:,}" if isinstance(n_lstm, int) else n_lstm)
         with col3:
-            if 'severity' in anomalies.columns:
-                critical = (anomalies['severity'] == 'CRITICAL').sum()
-                st.metric("🔴 Critical", f"{critical:,}")
+            n_ens = int(ml_df['is_anomaly_ensemble'].sum()) if 'is_anomaly_ensemble' in ml_df.columns else 'N/A'
+            st.metric("⚡ Ensemble Anomalies", f"{n_ens:,}" if isinstance(n_ens, int) else n_ens)
+        with col4:
+            total = len(ml_df)
+            n_any = int(ml_df['is_anomaly_ensemble'].sum()) if 'is_anomaly_ensemble' in ml_df.columns else int(ml_df['is_anomaly_ai'].sum())
+            rate = n_any / total * 100 if total > 0 else 0
+            st.metric("Anomaly Rate", f"{rate:.2f}%")
         
         st.markdown("---")
         
-        # Anomaly scatter plot: CPU Avg vs CPU Range
-        st.subheader("CPU Avg vs CPU Range: Normal vs Anomaly")
-        sample = data.sample(min(10000, len(data)))
-        fig = px.scatter(
-            sample, x='avg_cpu', y='cpu_range' if 'cpu_range' in sample.columns else 'max_cpu',
-            color=sample['is_anomaly'].map({True: '🔴 Anomaly', False: '🟢 Normal'}),
+        # 3D Scatter: CPU vs RAM vs Disk with anomaly coloring
+        st.subheader("Multi-Metric Anomaly View")
+        sample = ml_df.sample(min(5000, len(ml_df)))
+        fig = px.scatter_3d(
+            sample, 
+            x='cpu_util_percent', y='mem_util_percent', z='disk_io_percent',
+            color=sample['is_anomaly_ai'].map({True: '🔴 Anomaly', False: '🟢 Normal'}),
             opacity=0.5,
             color_discrete_map={'🔴 Anomaly': 'red', '🟢 Normal': 'blue'},
-            title="Anomaly Detection: CPU Avg vs CPU Range"
+            title="CPU vs RAM vs Disk (3D Anomaly View)",
+            labels={'cpu_util_percent': 'CPU %', 'mem_util_percent': 'RAM %',
+                    'disk_io_percent': 'Disk IO %'}
         )
+        fig.update_layout(height=600)
         st.plotly_chart(fig, use_container_width=True)
         
-        # Anomaly timeline
-        if 'timestamp' in data.columns:
-            st.subheader("Anomaly Timeline")
-            data_sorted = data.sort_values('timestamp')
-            
-            # Resample anomaly count
-            data_sorted = data_sorted.set_index('timestamp')
-            anomaly_ts = data_sorted['is_anomaly'].resample('1h').sum()
-            total_ts = data_sorted['is_anomaly'].resample('1h').count()
-            rate_ts = (anomaly_ts / total_ts * 100).fillna(0)
-            
-            fig = make_subplots(specs=[[{"secondary_y": True}]])
-            fig.add_trace(
-                go.Bar(x=anomaly_ts.index, y=anomaly_ts.values,
-                       name="Anomaly Count", marker_color="coral",
-                       opacity=0.7),
-                secondary_y=False
-            )
-            fig.add_trace(
-                go.Scatter(x=rate_ts.index, y=rate_ts.values,
-                          name="Anomaly Rate %", line=dict(color='red', width=2)),
-                secondary_y=True
-            )
-            fig.update_layout(title="Anomalies Over Time (Hourly)")
-            fig.update_yaxes(title_text="Count", secondary_y=False)
-            fig.update_yaxes(title_text="Rate (%)", secondary_y=True)
+        # Anomaly score distribution
+        col_a, col_b = st.columns(2)
+        with col_a:
+            st.subheader("Anomaly Score Distribution")
+            fig = px.histogram(ml_df, x='if_anomaly_score', nbins=50,
+                             color=ml_df['is_anomaly_ai'].map({True: 'Anomaly', False: 'Normal'}),
+                             title="Isolation Forest Anomaly Scores",
+                             color_discrete_map={'Anomaly': 'red', 'Normal': 'steelblue'})
+            fig.add_vline(x=-0.05, line_dash="dash", line_color="red",
+                         annotation_text="Threshold")
             st.plotly_chart(fig, use_container_width=True)
-            data_sorted = data_sorted.reset_index()
         
-        # Anomaly details table
-        st.subheader("Recent Anomalies")
+        with col_b:
+            st.subheader("Anomalies by Resource Type")
+            if not anomalies.empty:
+                high_cpu = (anomalies['cpu_util_percent'] > 90).sum()
+                high_mem = (anomalies['mem_util_percent'] > 95).sum()
+                high_disk = (anomalies['disk_io_percent'] > 90).sum()
+                fig = px.bar(
+                    x=['High CPU (>90%)', 'High RAM (>95%)', 'High Disk (>90%)'],
+                    y=[high_cpu, high_mem, high_disk],
+                    color=['CPU', 'RAM', 'Disk'],
+                    title="Anomaly Breakdown by Resource"
+                )
+                st.plotly_chart(fig, use_container_width=True)
+        
+        # Top anomalies table
+        st.subheader("🔥 Top Anomalous Machines")
         if not anomalies.empty:
-            display_cols = ['timestamp', 'vm_id', 'vm_category', 'avg_cpu', 
-                          'max_cpu', 'min_cpu', 'cpu_range']
-            if 'anomaly_score' in anomalies.columns:
-                display_cols.append('anomaly_score')
-            if 'severity' in anomalies.columns:
-                display_cols.append('severity')
-            
-            available_cols = [c for c in display_cols if c in anomalies.columns]
-            st.dataframe(
-                anomalies[available_cols].tail(50).sort_values(
-                    'anomaly_score' if 'anomaly_score' in anomalies.columns else 'avg_cpu'
-                ),
-                use_container_width=True
-            )
+            display_cols = [
+                'machine_id', 'cpu_util_percent', 'mem_util_percent',
+                'disk_io_percent', 'if_anomaly_score'
+            ]
+            # Add LSTM/ensemble columns when available
+            for c in ['lstm_recon_error', 'is_anomaly_lstm', 'is_anomaly_ensemble']:
+                if c in anomalies.columns:
+                    display_cols.append(c)
+            top_anomalies = anomalies.nsmallest(20, 'if_anomaly_score')[
+                display_cols
+            ].reset_index(drop=True)
+            st.dataframe(top_anomalies, use_container_width=True)
     else:
-        st.info("Run ML pipeline first to see anomaly detection results")
+        st.info("⏳ No ML results yet. Start the pipeline first:")
+        st.code("""
+# 1. Start Spark Consumer
+python3.10 spark_processing/streaming_consumer.py
+
+# 2. Start Kafka Producer  
+python3.10 kafka_stream/real_data_producer.py --max-records 100000
+""")
 
 
 # ============================================
-# PAGE: FORECASTING
+# PAGE: MACHINE ANALYTICS
 # ============================================
-elif page == "📈 Forecasting":
-    st.title("📈 Resource Usage Forecasting")
+elif page == "📊 Machine Analytics":
+    st.title("📊 Machine Analytics")
     
-    df = load_processed_data()
+    df = load_historical_data()
     
     if df is not None:
-        # VM selector
-        vm_ids = sorted(df['vm_id'].unique())
-        selected_vm = st.selectbox("Select VM", vm_ids[:20])
+        # Per-machine stats
+        machine_stats = df.groupby('machine_id').agg({
+            'cpu_util_percent': 'mean',
+            'mem_util_percent': 'mean',
+            'disk_io_percent': 'mean',
+        }).reset_index()
+        machine_stats.columns = ['machine_id', 'avg_cpu', 'avg_mem', 'avg_disk']
         
-        vm_data = df[df['vm_id'] == selected_vm].sort_values('timestamp')
+        # Box plots
+        st.subheader("Resource Usage Distribution (per-record)")
+        col1, col2, col3 = st.columns(3)
+        sample = df.sample(min(10000, len(df)))
         
-        # CPU time series for selected VM
-        st.subheader(f"CPU Usage: {selected_vm[:20]}...")
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(
-            x=vm_data['timestamp'], y=vm_data['avg_cpu'],
-            mode='lines', name='Avg CPU',
-            line=dict(color='blue', width=1)
-        ))
-        fig.add_trace(go.Scatter(
-            x=vm_data['timestamp'], y=vm_data['max_cpu'],
-            mode='lines', name='Max CPU',
-            line=dict(color='red', width=0.5), opacity=0.5
-        ))
-        fig.add_trace(go.Scatter(
-            x=vm_data['timestamp'], y=vm_data['min_cpu'],
-            mode='lines', name='Min CPU',
-            line=dict(color='green', width=0.5), opacity=0.5
-        ))
-        fig.add_hline(y=80, line_dash="dash", line_color="orange",
-                     annotation_text="Warning")
-        fig.update_layout(
-            yaxis_title="CPU %",
-            xaxis_title="Time (s)",
-        )
-        st.plotly_chart(fig, use_container_width=True)
+        with col1:
+            fig = px.box(sample, y='cpu_util_percent', title="CPU Usage %")
+            fig.update_traces(marker_color='#636EFA')
+            st.plotly_chart(fig, use_container_width=True)
+        with col2:
+            fig = px.box(sample, y='mem_util_percent', title="RAM Usage %")
+            fig.update_traces(marker_color='#EF553B')
+            st.plotly_chart(fig, use_container_width=True)
+        with col3:
+            fig = px.box(sample, y='disk_io_percent', title="Disk IO %")
+            fig.update_traces(marker_color='#00CC96')
+            st.plotly_chart(fig, use_container_width=True)
         
-        # CPU Range (Volatility) time series
-        if 'cpu_range' in vm_data.columns:
-            st.subheader(f"CPU Volatility: {selected_vm[:20]}...")
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(
-                x=vm_data['timestamp'], y=vm_data['cpu_range'],
-                mode='lines', name='CPU Range (Max-Min)',
-                line=dict(color='purple', width=1)
-            ))
-            fig.update_layout(yaxis_title="CPU Range %", xaxis_title="Time (s)")
+        # Top consumers
+        col_a, col_b = st.columns(2)
+        
+        with col_a:
+            st.subheader("🔥 Top 10 CPU Consumers")
+            top_cpu = machine_stats.nlargest(10, 'avg_cpu')
+            fig = px.bar(top_cpu, x='avg_cpu', y='machine_id',
+                        orientation='h', title="Highest Avg CPU",
+                        labels={'avg_cpu': 'Avg CPU %', 'machine_id': 'Machine'})
+            fig.update_traces(marker_color='#636EFA')
+            st.plotly_chart(fig, use_container_width=True)
+        
+        with col_b:
+            st.subheader("🔥 Top 10 RAM Consumers")
+            top_mem = machine_stats.nlargest(10, 'avg_mem')
+            fig = px.bar(top_mem, x='avg_mem', y='machine_id',
+                        orientation='h', title="Highest Avg RAM",
+                        labels={'avg_mem': 'Avg RAM %', 'machine_id': 'Machine'})
+            fig.update_traces(marker_color='#EF553B')
             st.plotly_chart(fig, use_container_width=True)
         
         # Correlation heatmap
         st.subheader("Feature Correlations")
-        numeric_cols = ['min_cpu', 'max_cpu', 'avg_cpu', 'cpu_range',
-                       'vm_core_count', 'vm_memory_gb']
-        available = [c for c in numeric_cols if c in vm_data.columns]
-        corr = vm_data[available].corr()
-        fig = px.imshow(corr, text_auto='.2f', color_continuous_scale='RdBu_r',
-                       title="Metric Correlations")
+        numeric_cols = ['cpu_util_percent', 'mem_util_percent', 'disk_io_percent']
+        corr = df[numeric_cols].corr()
+        fig = px.imshow(corr, text_auto='.3f', color_continuous_scale='RdBu_r',
+                       title="Metric Correlations", 
+                       x=['CPU', 'RAM', 'Disk'], y=['CPU', 'RAM', 'Disk'])
+        st.plotly_chart(fig, use_container_width=True)
+        
+        # Per-machine selector
+        st.markdown("---")
+        st.subheader("🔎 Machine Deep Dive")
+        machine_ids = sorted(df['machine_id'].unique())
+        selected = st.selectbox("Select Machine", machine_ids[:50])
+        
+        m_data = df[df['machine_id'] == selected].sort_values('timestamp')
+        
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(x=m_data['timestamp'], y=m_data['cpu_util_percent'],
+                                mode='lines', name='CPU %'))
+        fig.add_trace(go.Scatter(x=m_data['timestamp'], y=m_data['mem_util_percent'],
+                                mode='lines', name='RAM %'))
+        fig.add_trace(go.Scatter(x=m_data['timestamp'], y=m_data['disk_io_percent'],
+                                mode='lines', name='Disk IO %'))
+        fig.update_layout(title=f"Resource Usage: {selected}",
+                         xaxis_title="Timestamp (s)", yaxis_title="Usage %")
         st.plotly_chart(fig, use_container_width=True)
     else:
         st.warning("No data available")
 
 
 # ============================================
-# PAGE: VM ANALYTICS
-# ============================================
-elif page == "📊 VM Analytics":
-    st.title("📊 VM Analytics")
-    
-    df = load_processed_data()
-    
-    if df is not None:
-        # CPU distribution by VM category
-        st.subheader("CPU Distribution by Category")
-        fig = px.box(df.sample(min(20000, len(df))), 
-                     x='vm_category', y='avg_cpu',
-                     color='vm_category',
-                     title="CPU Usage Distribution")
-        st.plotly_chart(fig, use_container_width=True)
-        
-        # CPU Range distribution
-        st.subheader("CPU Volatility by Category")
-        fig = px.box(df.sample(min(20000, len(df))),
-                     x='vm_category', y='cpu_range',
-                     color='vm_category',
-                     title="CPU Range (Max-Min) Distribution")
-        st.plotly_chart(fig, use_container_width=True)
-        
-        # Top CPU consumers
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.subheader("🔥 Top 10 CPU Consumers")
-            top_cpu = df.groupby('vm_id')['avg_cpu'].mean() \
-                .sort_values(ascending=False).head(10)
-            # Shorten VM IDs for display
-            display_ids = [f"{vid[:12]}..." for vid in top_cpu.index]
-            fig = px.bar(x=top_cpu.values, y=display_ids,
-                        orientation='h', title="Highest Avg CPU VMs",
-                        labels={'x': 'Avg CPU %', 'y': 'VM ID'})
-            st.plotly_chart(fig, use_container_width=True)
-        
-        with col2:
-            st.subheader("🔥 Top 10 Most Volatile")
-            top_range = df.groupby('vm_id')['cpu_range'].mean() \
-                .sort_values(ascending=False).head(10)
-            display_ids = [f"{vid[:12]}..." for vid in top_range.index]
-            fig = px.bar(x=top_range.values, y=display_ids,
-                        orientation='h', title="Highest CPU Range VMs",
-                        labels={'x': 'Avg CPU Range %', 'y': 'VM ID'})
-            st.plotly_chart(fig, use_container_width=True)
-        
-        # Core count vs CPU usage
-        st.subheader("CPU Usage vs Core Count")
-        core_stats = df.groupby('vm_core_count')['avg_cpu'].mean().reset_index()
-        fig = px.bar(core_stats, x='vm_core_count', y='avg_cpu',
-                    title="Average CPU by Core Count",
-                    labels={'vm_core_count': 'Core Count', 'avg_cpu': 'Avg CPU %'})
-        st.plotly_chart(fig, use_container_width=True)
-
-
-# ============================================
 # PAGE: ML MODEL RESULTS
 # ============================================
 elif page == "🤖 ML Model Results":
-    st.title("🤖 ML Model Results")
+    st.title("🤖 ML Model Results & Explainable AI (XAI)")
     
-    plots = load_training_plots()
+    ml_df = load_ml_results()
     
-    if plots:
-        for name, path in plots.items():
-            st.subheader(name.replace("_", " ").replace(".png", "").title())
-            st.image(path, use_container_width=True)
+    if ml_df is not None:
+        st.subheader("Latest Batch Results")
+        st.dataframe(ml_df.tail(50), use_container_width=True)
     else:
-        st.info("No training plots found. Train models first:")
-        st.code("""
-# Train Isolation Forest
-python ml_models/isolation_forest_model.py
-
-# Train LSTM models  
-python ml_models/lstm_models.py
-""")
+        st.info("No ML results yet. Run the pipeline first.")
     
-    # Model comparison
-    st.subheader("Model Comparison")
-    comparison_data = {
-        'Model': ['Isolation Forest', 'LSTM Autoencoder', 'LSTM Forecaster'],
-        'Type': ['Anomaly Detection', 'Anomaly Detection', 'Forecasting'],
-        'Approach': ['Unsupervised (point)', 'Unsupervised (sequence)', 'Supervised'],
-        'Strength': [
-            'Fast, no temporal context needed',
-            'Captures temporal patterns, sequence anomalies',
-            'Predicts future usage for capacity planning'
+    # Explainable AI (XAI) insights
+    st.markdown("---")
+    st.subheader("🧠 BiLSTM Attention Weights (XAI)")
+    attention_plot_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "output", "plots", "attention_weights.png"
+    )
+    if os.path.exists(attention_plot_path):
+        st.image(attention_plot_path, caption="Temporal Attention Weights from BiLSTM", use_container_width=True)
+        st.info("💡 **Giải thích (Interpretability):** Biểu đồ Heatmap (Attention Weights) cho thấy khoảng thời gian (Time Steps) nào có trọng số chú ý cao nhất, tức là ảnh hưởng nhiều nhất tới quyết định phát hiện bất thường của mô hình BiLSTM.")
+    else:
+        st.info("Chưa có biểu đồ Attention Weights. Hãy chạy huấn luyện mô hình `lstm_models.py` để sinh biểu đồ này.")
+    
+    # Model info
+    st.subheader("Model Information")
+    model_info = {
+        'Model': ['Isolation Forest', 'BiLSTM + Attention Autoencoder', 'Ensemble (IF + BiLSTM)'],
+        'Type': ['Point Anomaly (Unsupervised)', 'Sequence Anomaly (Semi-supervised)', 'Union vote'],
+        'Features': ['cpu_util_percent, mem_util_percent, disk_io_percent'] * 3,
+        'Config / Performance': [
+            '5% contamination | threshold = -0.05',
+            'seq_len=30 | threshold=p95 recon error | BiLSTM-Attention',
+            'Anomaly if IF=True OR LSTM=True',
         ],
-        'Weakness': [
-            'Misses gradual trends',
-            'Slower, needs sequence of data points',
-            'Needs retraining for new patterns'
-        ],
+        'Dataset': ['Alibaba Cluster Trace V2018'] * 3,
     }
-    st.table(pd.DataFrame(comparison_data))
+    st.table(pd.DataFrame(model_info))
 
 
 # ============================================

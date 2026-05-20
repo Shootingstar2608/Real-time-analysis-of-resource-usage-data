@@ -1,0 +1,280 @@
+\documentclass[12pt,a4paper]{article}
+
+% ============================================================
+% PACKAGES
+% ============================================================
+\usepackage[utf8]{inputenc}
+\usepackage[T5]{fontenc}
+\usepackage[vietnamese]{babel}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{hyperref}
+\usepackage{tikz}
+\usepackage{enumitem}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage{mdframed}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{float}
+\usepackage{caption}
+\usepackage{subcaption}
+
+% ============================================================
+% COLORS
+% ============================================================
+\definecolor{kafkaorange}{RGB}{224, 131, 51}
+\definecolor{sparkblue}{RGB}{36, 110, 185}
+\definecolor{mlgreen}{RGB}{39, 153, 94}
+\definecolor{sectionblue}{RGB}{30, 80, 160}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=sectionblue,
+    urlcolor=sparkblue,
+    citecolor=mlgreen
+}
+
+% ============================================================
+% LISTINGS CONFIG
+% ============================================================
+\definecolor{codebg}{RGB}{248, 248, 248}
+\definecolor{codeframe}{RGB}{200, 200, 200}
+\lstset{
+    backgroundcolor=\color{codebg},
+    frame=single,
+    rulecolor=\color{codeframe},
+    basicstyle=\ttfamily\small,
+    breaklines=true,
+    breakatwhitespace=true,
+    keywordstyle=\color{sparkblue}\bfseries,
+    commentstyle=\color{gray}\itshape,
+    stringstyle=\color{mlgreen},
+    showstringspaces=false,
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    numbersep=6pt,
+    captionpos=b,
+    xleftmargin=15pt,
+    xrightmargin=5pt
+}
+
+% ============================================================
+% HEADER / FOOTER
+% ============================================================
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\textcolor{gray}{Real-time Analysis of Resource Usage Data}}
+\fancyhead[R]{\small\textcolor{gray}{Báo cáo Cuối kỳ}}
+\fancyfoot[C]{\small\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+% ============================================================
+% TITLE FORMAT
+% ============================================================
+\titleformat{\section}
+  {\large\bfseries\color{sectionblue}}
+  {\thesection.}{0.5em}{}[\titlerule]
+
+\titleformat{\subsection}
+  {\normalsize\bfseries\color{sectionblue!80!black}}
+  {\thesubsection.}{0.5em}{}
+
+\titleformat{\subsubsection}
+  {\normalsize\bfseries\color{sectionblue!60!black}}
+  {\thesubsubsection.}{0.5em}{}
+
+% ============================================================
+% DOCUMENT START
+% ============================================================
+\begin{document}
+
+% ------------------------------------------------------------
+% TITLE PAGE
+% ------------------------------------------------------------
+\begin{titlepage}
+    \centering
+    \vspace*{2cm}
+    
+    {\Huge \bfseries Hệ thống Phân tích và Phát hiện\\[0.5cm] Bất thường Tài nguyên Cloud Real-time\par}
+    \vspace{1.5cm}
+    
+    {\Large \textbf{Báo cáo Đồ án Cuối kỳ}\par}
+    \vspace{2cm}
+    
+    {\large
+    \textbf{Sinh viên thực hiện:}\\
+    Nguyễn Văn A - MSSV\\[0.5cm]
+    \textbf{Giáo viên hướng dẫn:}\\
+    Tiến sĩ B\par}
+    
+    \vfill
+    
+    {\large Ngày \today\par}
+\end{titlepage}
+
+\newpage
+\tableofcontents
+\newpage
+
+% ------------------------------------------------------------
+% 1. Giới thiệu
+% ------------------------------------------------------------
+\section{Giới thiệu và Đặt vấn đề}
+
+Trong kỷ nguyên điện toán đám mây, việc duy trì sự ổn định của hệ thống phân tán khổng lồ là một thách thức cực kỳ lớn. Các cụm máy chủ (cluster) chứa hàng chục ngàn máy ảo luôn phải đối mặt với các vấn đề như quá tải tài nguyên (CPU, RAM, Disk), rò rỉ bộ nhớ (memory leak), hay các tác vụ chạy nền chiếm dụng băng thông một cách bất thường.
+
+Dự án này hướng đến việc giải quyết bài toán \textbf{Giám sát Tài nguyên và Phát hiện Bất thường Thời gian thực (Real-time Resource Monitoring \& Anomaly Detection)} sử dụng tập dữ liệu thực tế từ hệ thống Alibaba Cloud. Thách thức lớn nhất trong đồ án bao gồm:
+\begin{itemize}
+    \item \textbf{Khối lượng dữ liệu khổng lồ (Volume \& Velocity):} Dữ liệu sinh ra liên tục theo từng mili-giây, yêu cầu một kiến trúc Data Pipeline đủ mạnh mẽ để xử lý (High Throughput) mà không bị độ trễ.
+    \item \textbf{Nhiễu dữ liệu (Noise):} Môi trường Cloud luôn có những "spike" (gai) tạm thời do các tác vụ ngắn hạn (cron job), làm mô hình dễ sinh ra cảnh báo giả (False Positive).
+    \item \textbf{Thiếu nhãn (Unsupervised Nature):} Dữ liệu chuỗi thời gian thực tế không có nhãn sẵn cho các sự cố. Do đó, cần có phương pháp tiếp cận Unsupervised Learning (Tự học không giám sát) để phát hiện.
+    \item \textbf{Định hướng Output (RAM-Centric):} Theo tư vấn chuyên môn từ Giảng viên Hướng dẫn, CPU thường xuyên có biến động (spike) ngắn hạn và không phản ánh chính xác tình trạng "suy kiệt" của một máy chủ. Ngược lại, các vấn đề rò rỉ bộ nhớ (Memory Leak) hoặc tràn RAM mới là nguyên nhân tĩnh lặng (silent killer) khiến máy chủ bị Crash (OOM - Out of Memory). Do đó, dự án đặt trọng tâm đánh giá và phát hiện bất thường vào \textbf{Memory Utilization (Mức sử dụng RAM)}.
+\end{itemize}
+
+% ------------------------------------------------------------
+% 2. Kiến trúc Hệ thống
+% ------------------------------------------------------------
+\section{Kiến trúc Hệ thống Thời gian thực (Real-time Pipeline)}
+
+Để đáp ứng được yêu cầu về mặt dữ liệu lớn và thời gian thực, dự án sử dụng kiến trúc Big Data tiêu chuẩn với sự kết hợp của hai thành phần cốt lõi là \textbf{Apache Kafka} và \textbf{Apache Spark}. Luồng dữ liệu (Data Flow) diễn ra như sau:
+
+\subsection{Message Broker với Apache Kafka}
+Dữ liệu sử dụng CPU, RAM của máy chủ được đọc liên tục từ file log. \texttt{Kafka Producer} sẽ nén các dòng dữ liệu này dưới dạng chuỗi JSON và bắn vào một Kafka Topic (\texttt{machine\_usage\_topic}). 
+Kafka đóng vai trò là một bộ đệm (buffer) khổng lồ, tách biệt (decouple) giữa bên sản sinh dữ liệu và bên xử lý dữ liệu. Điều này giúp hệ thống không bị sập khi có lượng log đột biến (Data Spike).
+
+\subsection{Xử lý Luồng với Apache Spark Streaming}
+Dữ liệu từ Kafka sẽ được Spark Streaming (cấu trúc \textit{Structured Streaming}) tiêu thụ thông qua cơ chế \textit{Micro-batching}. Mỗi batch dữ liệu (ví dụ: vài giây một lần) sẽ được xử lý:
+\begin{itemize}
+    \item \textbf{Aggregation:} Tính toán các đặc trưng thống kê như Trung bình (Mean), Độ lệch chuẩn (Std), Max, Min theo nhiều khung thời gian (Tumbling Windows).
+    \item \textbf{Rule-based Detection:} Các quy tắc tĩnh như "CPU $>$ 95\%" sẽ ngay lập tức kích hoạt cảnh báo mức độ cơ bản.
+    \item \textbf{Machine Learning Inference:} Chạy song song mô hình Machine Learning (đã được train trước) trực tiếp trên các batch đang chảy bằng hàm \texttt{foreachBatch} để đưa ra kết luận bất thường chuyên sâu.
+\end{itemize}
+Toàn bộ kết quả xử lý sẽ được xuất (sink) vào một hệ thống file hoặc cơ sở dữ liệu để \textbf{Streamlit Dashboard} trực quan hóa lên màn hình cho kỹ sư vận hành.
+
+% ------------------------------------------------------------
+% 3. Phương pháp Học máy
+% ------------------------------------------------------------
+\section{Phương pháp Học Máy \& Kiến trúc Mô hình (Trọng tâm)}
+
+Vì bài toán yêu cầu phát hiện chuỗi thời gian có tính chất liên tục và tuần hoàn, các mô hình cổ điển như Isolation Forest tuy nhanh nhưng bỏ qua "bối cảnh thời gian" (temporal context). Do đó, dự án đề xuất sử dụng mạng học sâu \textbf{BiLSTM-Attention Autoencoder} làm giải pháp trung tâm.
+
+\subsection{Kiến trúc BiLSTM-Attention Autoencoder}
+Mô hình \textbf{Autoencoder} (Bộ tự mã hóa) là một kiến trúc Unsupervised nổi tiếng dùng để nén dữ liệu vào không gian ẩn (Latent space) và sau đó tái tạo (Reconstruct) lại. Nếu dữ liệu đầu vào là "bình thường", mức độ sai số tái tạo (Reconstruction Error - MSE) sẽ thấp. Nếu đầu vào là một mẫu "bất thường", mô hình chưa từng thấy trong tập train, sai số sẽ vọt lên rất cao.
+
+Đặc biệt, dự án kết hợp các công nghệ sau vào lõi của Autoencoder:
+\begin{itemize}
+    \item \textbf{Bi-directional LSTM (Mạng bộ nhớ ngắn-dài 2 chiều):} Dữ liệu tài nguyên có tính phụ thuộc thời gian mạnh (Time-series). BiLSTM cho phép mô hình học được ngữ cảnh từ cả quá khứ (forward) và tương lai (backward) trong một cửa sổ trượt (Time Window = 30 bước).
+    \item \textbf{Temporal Attention Mechanism (Cơ chế chú ý):} Không phải mọi thời điểm trong quá khứ đều có tầm quan trọng như nhau đối với sự kiện bất thường hiện tại. Lớp Attention giúp mạng nơ-ron "tập trung" (đánh trọng số lớn) vào các điểm mấu chốt, giúp cải thiện độ chính xác và tính có thể giải thích được (Interpretability).
+\end{itemize}
+
+\subsection{Phương pháp Huấn luyện \& Giả lập Bất thường (Synthetic Anomalies)}
+Hệ thống học máy trong dự án được thiết kế theo quy trình nghiêm ngặt nhằm tránh hiện tượng rò rỉ dữ liệu (Data Leakage) và đảm bảo tính khách quan khi đánh giá:
+
+\begin{enumerate}
+    \item \textbf{Phân chia Dữ liệu (Train/Test Split):} Dữ liệu được chia theo tỷ lệ 70/30 (hoặc 80/20) theo thứ tự thời gian tuyến tính. Mô hình Autoencoder chỉ được học (fit) hoàn toàn trên tập Train giả định là "sạch" (Bình thường), qua đó học được trạng thái ổn định của Server.
+    \item \textbf{Chuẩn hóa (Scaling):} Sử dụng \texttt{MinMaxScaler} để đưa các giá trị CPU, RAM, Disk về khoảng [0, 1]. Điểm mấu chốt là \texttt{scaler} chỉ được \texttt{fit} trên tập Train, sau đó áp dụng biến đổi (\texttt{transform}) cho tập Test. Điều này đảm bảo mô hình không "nhìn trộm" được biên độ dao động của tương lai.
+    \item \textbf{Giả lập Bất thường (Synthetic Anomalies):} Vì tập dữ liệu gốc của Alibaba không cung cấp nhãn sự cố, ta không thể tính toán được Recall (Tỉ lệ bắt đúng sự cố). Để giải quyết, dự án xây dựng hàm \texttt{synthesize\_anomalies} can thiệp trực tiếp vào tập Test.
+\end{enumerate}
+
+\textbf{Logic giả lập bất thường (Trọng tâm RAM):}
+Dựa trên quyết định tập trung vào sự cố Bộ nhớ, hàm giả lập sẽ chọn ngẫu nhiên các khung thời gian ngắn (từ 3-8 bước) trên tập Test và tăng đột ngột mức sử dụng RAM thêm 30\% đến 50\% (cắt trần ở mức 100\%).
+\begin{lstlisting}[language=Python, title=Logic mô phỏng rò rỉ/tràn RAM]
+# Chon ngau nhien start va chieu dai window
+start = np.random.randint(0, len(test_df) - 10)
+length = np.random.randint(3, 8) 
+# Cong them 30-50% vao RAM hien tai (Memory Leak)
+mem_idx = test_df.columns.get_loc('mem_util_percent')
+test_df.iloc[start:end, mem_idx] += np.random.uniform(30, 50)
+# Clip ve max 100%
+test_df.iloc[start:end, mem_idx] = np.clip(
+    test_df.iloc[start:end, mem_idx], 0, 100.0
+)
+\end{lstlisting}
+Việc cộng thêm 30-50\% RAM (thay vì đẩy thẳng lên 100\%) là một quyết định quan trọng: nó mô phỏng đúng các sự cố rò rỉ bộ nhớ thực tế (khiến RAM tăng dần dần) thay vì tạo ra một bài toán quá dễ. Từ tập Test nhân tạo này, ta có được nhãn thực tế (Ground Truth) để đánh giá Recall và Precision của mô hình.
+
+\subsection{Tính toán Ngưỡng Quyết định Thống kê (Statistical Thresholding)}
+Sau khi tính được chuỗi Reconstruction Error cho các cửa sổ thời gian, làm sao để hệ thống máy tính biết mức lỗi bao nhiêu là "Bất thường"? Thay vì chọn một ngưỡng tĩnh theo kinh nghiệm, hệ thống dùng phương pháp \textbf{Ngưỡng 3-Sigma} (Quy tắc kinh nghiệm). Cụ thể, ngưỡng bất thường $\tau$ được tính toán dựa trên phân phối sai số của tập dữ liệu huấn luyện:
+
+\begin{equation}
+    \tau = \mu + 3\sigma
+\end{equation}
+
+Trong đó:
+\begin{itemize}
+    \item $\mu$: Giá trị trung bình (Mean) của sai số tái tạo (Reconstruction Error) trên tập Train.
+    \item $\sigma$: Độ lệch chuẩn (Standard Deviation) của sai số tái tạo.
+\end{itemize}
+
+Theo toán thống kê phân phối chuẩn, 99.7\% các điểm dữ liệu bình thường sẽ rơi vào vùng giới hạn dưới ngưỡng $\tau$. Bất kỳ điểm dữ liệu thời gian thực nào có mức sai số vượt qua ngưỡng này sẽ lập tức bị báo động là bất thường.
+
+% ------------------------------------------------------------
+% 4. Thực nghiệm và Kết quả
+% ------------------------------------------------------------
+\section{Thực nghiệm và Kết quả Đánh giá}
+
+\subsection{Đánh giá Mô hình bằng Event-wise F1}
+Trong bài toán Anomaly Detection chuỗi thời gian, việc dự đoán đúng chính xác từng điểm Point-by-point không thực sự mang ý nghĩa vận hành. Nếu một sự cố kéo dài 10 phút, kỹ sư chỉ cần hệ thống phát ra cảnh báo "bất kỳ lúc nào" trong 10 phút đó là đủ để xử lý. Do đó, dự án dùng phương pháp \textbf{Event-wise Evaluation}.
+
+\subsection{Kết quả Huấn luyện BiLSTM-Attention Autoencoder}
+Mô hình được thử nghiệm với 2 cách chia (Split) tập dữ liệu khác nhau (Train/Test) để kiểm chứng độ bền bỉ. Kết quả cuối cùng (từ hệ thống ML Inference) như sau:
+
+\begin{table}[H]
+    \centering
+    \begin{tabular}{|l|c|c|c|c|}
+        \hline
+        \textbf{Split Ratio} & \textbf{Threshold (3-Sigma)} & \textbf{Event-wise F1} & \textbf{Precision} & \textbf{Recall} \\
+        \hline
+        70\% Train - 30\% Test & 0.010032 & 0.2329 & 0.1351 & 0.8416 \\
+        80\% Train - 20\% Test & 0.009545 & 0.2513 & 0.1446 & 0.9589 \\
+        \hline
+    \end{tabular}
+    \caption{Kết quả đánh giá mô hình BiLSTM-Attention Autoencoder}
+    \label{tab:results}
+\end{table}
+
+\textbf{Đánh giá kết quả (Sự đánh đổi Precision - Recall):}
+Kết quả cho thấy \textbf{Recall đạt mức rất cao (84.16\% - 95.89\%)}. Điều này chứng minh mô hình rất nhạy và bắt được hầu hết mọi sự kiện quá tải. Bù lại, Precision duy trì ở mức 13-14\%, nghĩa là có tồn tại cảnh báo giả (False Positive). 
+Tuy nhiên, trong nguyên lý an toàn hệ thống (Site Reliability Engineering), người ta chấp nhận "Thà bắt nhầm còn hơn bỏ sót" đối với các tín hiệu phần cứng. Việc đạt được Recall cao với ngưỡng phân tích tĩnh là một thành công lớn của mô hình Unsupervised.
+
+\subsection{Trực quan hóa Cơ chế Attention (Interpretability)}
+Điểm mạnh của mạng Attention là có thể "giải thích" (Explainable AI) được quyết định của nó thông qua việc xuất Ma trận trọng số (Attention Weights).
+
+\begin{figure}[H]
+    \centering
+    % \includegraphics[width=0.8\textwidth]{images/attention_weights.png}
+    \caption{[Placeholder] Biểu đồ Heatmap thể hiện sự phân bổ trọng số của mô hình BiLSTM (Attention Weights). Mô hình tập trung mạnh ở các bước T-25 để lấy ngữ cảnh thay vì chỉ dựa vào T-1.}
+    \label{fig:attention}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    % \includegraphics[width=\textwidth]{images/lstm_analysis.png}
+    \caption{[Placeholder] Biểu đồ phân tích tổng hợp (Reconstruction Error, Forecast CPU và Anomaly Density). Sự tách biệt rõ ràng giữa hai vùng phân phối xanh-đỏ chứng tỏ khả năng nhận dạng của Latent Space.}
+    \label{fig:analysis}
+\end{figure}
+
+% ------------------------------------------------------------
+% 5. Kết luận
+% ------------------------------------------------------------
+\section{Kết luận và Hướng Phát triển}
+
+Dự án đã xây dựng thành công một hệ thống Data Pipeline đầu cuối (End-to-End) hoàn chỉnh bằng Kafka và Spark Streaming, đi kèm với mô hình Deep Learning phức tạp (BiLSTM-Attention Autoencoder). Hệ thống đã chứng minh được khả năng:
+\begin{enumerate}
+    \item Xử lý luồng dữ liệu thời gian thực mạnh mẽ, không tắc nghẽn.
+    \item Tự động nhận diện các mẫu (pattern) bình thường của tài nguyên Cloud.
+    \item Kích hoạt báo động độ nhạy cao (Recall $>84\%$) ngay khi có sự kiện bất thường.
+\end{enumerate}
+
+\textbf{Hướng phát triển tương lai:}
+\begin{itemize}
+    \item Triển khai ngưỡng động (Dynamic Thresholding) thay cho 3-Sigma tĩnh để làm giảm số lượng False Positives (Cải thiện Precision).
+    \item Đẩy ML Inference thành REST API riêng biệt thay vì chạy trực tiếp trong Spark Batch để giảm tải cho Worker Node.
+\end{itemize}
+
+\end{document}

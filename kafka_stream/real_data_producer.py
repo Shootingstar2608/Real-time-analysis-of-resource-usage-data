@@ -1,12 +1,18 @@
 """
 Real Data Kafka Producer
-Đọc trực tiếp file .csv.gz (Azure VM Traces) → enrich với vmtable → đẩy vào Kafka.
-Không cần qua bước prepare_data trung gian.
+Đọc trực tiếp file Alibaba cluster trace data (machine_usage.tar.gz) và đẩy vào Kafka.
+KHÔNG CẦN giải nén ra CSV — đọc on-the-fly từ file nén luôn.
 
-Schema thực tế:
-  cpu_readings: timestamp_s, vm_id, min_cpu, max_cpu, avg_cpu  (5 cột, không header)
-  vmtable:      vm_id, sub_id, deploy_id, created, deleted,
-                max_cpu, avg_cpu, p95_cpu, category, cores, memory  (11 cột, không header)
+Schema thực tế (9 cột, không có header trong file nguyên bản):
+  0: machine_id
+  1: time_stamp
+  2: cpu_util_percent
+  3: mem_util_percent
+  4: mem_gps
+  5: mkpi
+  6: net_in
+  7: net_out
+  8: disk_io_percent
 
 Usage:
   python kafka_stream/real_data_producer.py
@@ -17,15 +23,14 @@ Usage:
 import os
 import sys
 import csv
-import gzip
 import json
 import time
-import glob
+import tarfile
 import signal
 import logging
 import argparse
 from datetime import datetime
-from collections import defaultdict
+from io import TextIOWrapper
 
 from kafka import KafkaProducer
 from kafka.errors import KafkaError, NoBrokersAvailable
@@ -33,8 +38,7 @@ from kafka.errors import KafkaError, NoBrokersAvailable
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config.config import (
     KAFKA_BOOTSTRAP_SERVERS,
-    KAFKA_TOPIC_CPU,
-    DATA_DIR,
+    KAFKA_TOPIC_RESOURCE,
 )
 
 # ============================================
@@ -51,93 +55,25 @@ running = True
 
 def signal_handler(sig, frame):
     global running
-    logger.info("\n⏹ Đang dừng producer...")
+    logger.info("\n Đang dừng producer...")
     running = False
 
 signal.signal(signal.SIGINT, signal_handler)
 signal.signal(signal.SIGTERM, signal_handler)
 
-
-# ============================================
-# VM TABLE LOADER
-# ============================================
-def load_vm_table(raw_dir):
-    """
-    Load vmtable.csv.gz để enrich CPU readings với metadata.
-    Trả về dict: vm_id → {category, core_count, memory_gb}
-
-    vmtable schema (11 cột, không header):
-      0: encrypted_vm_id
-      1: encrypted_subscription_id
-      2: encrypted_deployment_id
-      3: timestamp_vm_created
-      4: timestamp_vm_deleted
-      5: max_cpu (lifetime)
-      6: avg_cpu (lifetime)
-      7: p95_cpu (lifetime)
-      8: vm_category (Interactive / Delay-insensitive / Unknown)
-      9: vm_virtual_core_count_bucket
-     10: vm_memory_bucket (GB)
-    """
-    vmtable_path = os.path.join(raw_dir, "vmtable.csv.gz")
-
-    if not os.path.exists(vmtable_path):
-        logger.warning(f"vmtable.csv.gz không tìm thấy tại {vmtable_path}")
-        logger.warning("Producer sẽ chạy không có metadata VM")
-        return {}
-
-    logger.info(f"📋 Đang load vmtable từ {vmtable_path}...")
-    vm_lookup = {}
-    count = 0
-
-    with gzip.open(vmtable_path, 'rt', encoding='utf-8') as f:
-        reader = csv.reader(f)
-        for row in reader:
-            if len(row) < 11:
-                continue
-            vm_id = row[0].strip()
-            try:
-                vm_lookup[vm_id] = {
-                    'vm_category': row[8].strip() if row[8].strip() else 'Unknown',
-                    'vm_core_count': int(row[9]) if row[9].strip() else 0,
-                    'vm_memory_gb': int(row[10]) if row[10].strip() else 0,
-                }
-            except (ValueError, IndexError):
-                vm_lookup[vm_id] = {
-                    'vm_category': 'Unknown',
-                    'vm_core_count': 0,
-                    'vm_memory_gb': 0,
-                }
-            count += 1
-
-    logger.info(f"  ✅ Loaded {count:,} VMs vào lookup table")
-
-    # Thống kê
-    categories = defaultdict(int)
-    for info in vm_lookup.values():
-        categories[info['vm_category']] += 1
-    for cat, cnt in sorted(categories.items(), key=lambda x: -x[1]):
-        logger.info(f"     {cat}: {cnt:,}")
-
-    return vm_lookup
-
-
 # ============================================
 # KAFKA PRODUCER CLASS
 # ============================================
-class RealDataProducer:
+class AlibabaDataProducer:
     """
-    Producer đọc trực tiếp từ file .csv.gz và đẩy vào Kafka.
-    Mỗi record được enrich với vmtable metadata trước khi gửi.
+    Producer đọc trực tiếp từ file .tar.gz của Alibaba (on-the-fly)
+    và đẩy vào Kafka. Không cần giải nén ra ổ cứng.
     """
 
-    def __init__(self, bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS,
-                 speed_factor=100, max_retries=5):
+    def __init__(self, bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS, speed_factor=100, max_retries=5):
         self.speed_factor = speed_factor
         self.total_sent = 0
         self.total_errors = 0
-        self.total_enriched = 0
-        self.total_not_enriched = 0
 
         # Retry connecting to Kafka
         for attempt in range(1, max_retries + 1):
@@ -154,11 +90,11 @@ class RealDataProducer:
                     compression_type='gzip',
                     max_request_size=5242880,  # 5MB max request
                 )
-                logger.info(f"✅ Kafka Producer connected: {bootstrap_servers}")
+                logger.info(f" Kafka Producer connected: {bootstrap_servers}")
                 return
             except NoBrokersAvailable:
                 logger.warning(
-                    f"⏳ Kafka chưa sẵn sàng (attempt {attempt}/{max_retries}). "
+                    f" Kafka chưa sẵn sàng (attempt {attempt}/{max_retries}). "
                     f"Thử lại sau 5s..."
                 )
                 time.sleep(5)
@@ -178,96 +114,74 @@ class RealDataProducer:
             if self.total_errors % 1000 == 1:
                 logger.error(f"Kafka send error: {e}")
 
-    def stream_from_raw_files(self, raw_dir, vm_lookup,
-                               batch_size=500, max_records=None):
+    def stream_from_tar_gz(self, tar_gz_path, batch_size=500, max_records=None):
         """
-        Đọc file cpu_readings .csv.gz → enrich → gửi Kafka.
-
-        cpu_readings schema (5 cột, không header):
-          0: timestamp (giây, relative, mỗi 300s = 5 phút)
-          1: encrypted_vm_id
-          2: min_cpu (%)
-          3: max_cpu (%)
-          4: avg_cpu (%)
+        Đọc trực tiếp từ file .tar.gz mà KHÔNG giải nén ra ổ cứng.
+        Sử dụng tarfile + TextIOWrapper để stream on-the-fly.
         """
         global running
 
-        # Tìm tất cả cpu_readings files
-        pattern = os.path.join(raw_dir, "vm_cpu_readings-*.csv.gz")
-        cpu_files = sorted(glob.glob(pattern))
-
-        if not cpu_files:
-            logger.error(f"❌ Không tìm thấy file cpu_readings tại {raw_dir}")
-            logger.info("Download trước: bash data/download_data.sh")
+        if not os.path.exists(tar_gz_path):
+            logger.error(f" Không tìm thấy file {tar_gz_path}")
+            logger.info("Tải trước: wget -c http://aliopentrace.oss-cn-beijing.aliyuncs.com/v2018Traces/machine_usage.tar.gz -P data/alibaba/")
             return
 
-        logger.info(f"📂 Tìm thấy {len(cpu_files)} file CPU readings")
+        file_size_gb = os.path.getsize(tar_gz_path) / (1024**3)
+        logger.info(f" Đọc trực tiếp từ {tar_gz_path} ({file_size_gb:.2f} GB nén)")
         if max_records:
-            logger.info(f"🔢 Giới hạn: {max_records:,} records")
+            logger.info(f" Giới hạn: {max_records:,} records")
 
         start_time = time.time()
         batch_count = 0
         records_in_batch = 0
 
-        for file_idx, gz_file in enumerate(cpu_files):
-            if not running:
-                break
+        try:
+            with tarfile.open(tar_gz_path, 'r:gz') as tar:
+                for member in tar.getmembers():
+                    if not running:
+                        break
+                    if not member.isfile():
+                        continue
 
-            filename = os.path.basename(gz_file)
-            logger.info(
-                f"\n📄 [{file_idx+1}/{len(cpu_files)}] Streaming {filename}..."
-            )
+                    logger.info(f"\n Streaming member: {member.name} ({member.size / (1024**3):.2f} GB uncompressed)")
 
-            try:
-                with gzip.open(gz_file, 'rt', encoding='utf-8') as f:
-                    reader = csv.reader(f)
+                    f = tar.extractfile(member)
+                    if f is None:
+                        continue
+
+                    text_stream = TextIOWrapper(f, encoding='utf-8')
+                    reader = csv.reader(text_stream)
 
                     for row in reader:
                         if not running:
                             break
 
-                        if len(row) < 5:
+                        if len(row) < 9:
                             continue
 
-                        # Parse CPU readings
+                        # Parse metrics
                         try:
-                            timestamp_s = float(row[0])
-                            vm_id = row[1].strip()
-                            min_cpu = float(row[2])
-                            max_cpu = float(row[3])
-                            avg_cpu = float(row[4])
+                            machine_id = row[0].strip()
+                            timestamp_s = float(row[1]) if row[1] else 0.0
+                            cpu_util = float(row[2]) if row[2] else 0.0
+                            mem_util = float(row[3]) if row[3] else 0.0
+                            disk_io = float(row[8]) if row[8] else 0.0
                         except (ValueError, IndexError):
                             continue
 
-                        # Tạo record cơ bản
+                        # Tạo record
                         record = {
+                            'machine_id': machine_id,
                             'timestamp': timestamp_s,
-                            'vm_id': vm_id,
-                            'min_cpu': round(min_cpu, 4),
-                            'max_cpu': round(max_cpu, 4),
-                            'avg_cpu': round(avg_cpu, 4),
-                            'cpu_range': round(max_cpu - min_cpu, 4),
+                            'cpu_util_percent': round(cpu_util, 2),
+                            'mem_util_percent': round(mem_util, 2),
+                            'disk_io_percent': round(disk_io, 2),
+                            'ingestion_timestamp': datetime.now().isoformat(),
+                            'source_file': member.name,
                         }
 
-                        # Enrich với vmtable metadata
-                        vm_info = vm_lookup.get(vm_id)
-                        if vm_info:
-                            record['vm_category'] = vm_info['vm_category']
-                            record['vm_core_count'] = vm_info['vm_core_count']
-                            record['vm_memory_gb'] = vm_info['vm_memory_gb']
-                            self.total_enriched += 1
-                        else:
-                            record['vm_category'] = 'Unknown'
-                            record['vm_core_count'] = 0
-                            record['vm_memory_gb'] = 0
-                            self.total_not_enriched += 1
-
-                        # Thêm metadata ingestion
-                        record['ingestion_timestamp'] = datetime.now().isoformat()
-                        record['source_file'] = filename
-
                         # Gửi vào Kafka
-                        self.send_record(KAFKA_TOPIC_CPU, vm_id, record)
+                        self.send_record(KAFKA_TOPIC_RESOURCE, machine_id, record)
                         records_in_batch += 1
 
                         # Flush theo batch
@@ -277,33 +191,29 @@ class RealDataProducer:
                             records_in_batch = 0
 
                             # Delay để simulate real-time
-                            # Data gốc 5-phút interval,
-                            # speed_factor quy đổi: 300s / speed / batch
                             delay = 300.0 / self.speed_factor / batch_size
                             time.sleep(max(delay, 0.001))
 
                         # Progress log mỗi 100K records
                         if self.total_sent % 100_000 == 0 and self.total_sent > 0:
                             elapsed = time.time() - start_time
-                            rate = self.total_sent / elapsed
+                            rate = self.total_sent / elapsed if elapsed > 0 else 0
                             logger.info(
-                                f"  📊 Sent: {self.total_sent:,} | "
+                                f"   Sent: {self.total_sent:,} | "
                                 f"Errors: {self.total_errors:,} | "
-                                f"Rate: {rate:,.0f} msg/s | "
-                                f"Enriched: {self.total_enriched:,}"
+                                f"Rate: {rate:,.0f} msg/s"
                             )
 
                         # Kiểm tra giới hạn
                         if max_records and self.total_sent >= max_records:
-                            logger.info(
-                                f"🏁 Đạt giới hạn {max_records:,} records"
-                            )
+                            logger.info(f" Đạt giới hạn {max_records:,} records")
                             running = False
                             break
 
-            except Exception as e:
-                logger.error(f"❌ Lỗi đọc file {filename}: {e}")
-                continue
+                    text_stream.close()
+
+        except Exception as e:
+            logger.error(f" Lỗi đọc file: {e}")
 
         # Flush cuối
         self.producer.flush()
@@ -313,76 +223,48 @@ class RealDataProducer:
         rate = self.total_sent / elapsed if elapsed > 0 else 0
 
         logger.info("\n" + "=" * 60)
-        logger.info("📊 KẾT QUẢ STREAMING")
+        logger.info(" KẾT QUẢ STREAMING")
         logger.info("=" * 60)
         logger.info(f"  Total sent:        {self.total_sent:,}")
         logger.info(f"  Total errors:      {self.total_errors:,}")
-        logger.info(f"  Enriched (vmtable):{self.total_enriched:,}")
-        logger.info(f"  Not enriched:      {self.total_not_enriched:,}")
         logger.info(f"  Duration:          {elapsed:.1f}s")
         logger.info(f"  Avg rate:          {rate:,.0f} msg/s")
         logger.info(f"  Batches flushed:   {batch_count:,}")
         logger.info("=" * 60)
 
     def close(self):
-        """Đóng producer"""
         self.producer.flush()
         self.producer.close()
         logger.info("Producer closed.")
 
 
-# ============================================
-# MAIN
-# ============================================
 def main():
-    parser = argparse.ArgumentParser(
-        description='Real Data Kafka Producer - Azure VM Traces → Kafka'
-    )
-    parser.add_argument(
-        '--speed', type=int, default=200,
-        help='Tốc độ replay (default: 200x, tức 5-min→1.5ms/record)'
-    )
-    parser.add_argument(
-        '--batch-size', type=int, default=500,
-        help='Batch size cho flush (default: 500)'
-    )
-    parser.add_argument(
-        '--max-records', type=int, default=None,
-        help='Giới hạn số records gửi (default: tất cả). VD: --max-records 1000000'
-    )
-    parser.add_argument(
-        '--data-dir', type=str, default=None,
-        help='Thư mục chứa file .csv.gz (default: data/raw)'
-    )
+    parser = argparse.ArgumentParser(description='Real Data Kafka Producer - Alibaba Data → Kafka')
+    parser.add_argument('--speed', type=int, default=1000, help='Tốc độ replay')
+    parser.add_argument('--batch-size', type=int, default=1000, help='Batch size cho flush')
+    parser.add_argument('--max-records', type=int, default=None, help='Giới hạn số records gửi')
     args = parser.parse_args()
 
-    # Xác định thư mục data
+    # Xác định đường dẫn file tar.gz
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    raw_dir = args.data_dir or os.path.join(project_root, DATA_DIR)
+    tar_gz_path = os.path.join(project_root, "data", "alibaba", "machine_usage.tar.gz")
 
     logger.info("=" * 60)
-    logger.info("  🚀 REAL DATA KAFKA PRODUCER")
-    logger.info("  Azure VM Traces → Kafka")
+    logger.info("   REAL DATA KAFKA PRODUCER (ALIBABA DATASET)")
+    logger.info("   Đọc trực tiếp từ .tar.gz — không cần giải nén")
     logger.info("=" * 60)
-    logger.info(f"  Data dir:    {raw_dir}")
+    logger.info(f"  Data file:   {tar_gz_path}")
     logger.info(f"  Speed:       {args.speed}x")
     logger.info(f"  Batch size:  {args.batch_size}")
     logger.info(f"  Max records: {args.max_records or 'unlimited'}")
     logger.info(f"  Kafka:       {KAFKA_BOOTSTRAP_SERVERS}")
-    logger.info(f"  Topic:       {KAFKA_TOPIC_CPU}")
+    logger.info(f"  Topic:       {KAFKA_TOPIC_RESOURCE}")
     logger.info("")
 
-    # 1. Load VM metadata
-    vm_lookup = load_vm_table(raw_dir)
-
-    # 2. Tạo producer
-    producer = RealDataProducer(speed_factor=args.speed)
-
-    # 3. Stream data
+    producer = AlibabaDataProducer(speed_factor=args.speed)
     try:
-        producer.stream_from_raw_files(
-            raw_dir=raw_dir,
-            vm_lookup=vm_lookup,
+        producer.stream_from_tar_gz(
+            tar_gz_path=tar_gz_path,
             batch_size=args.batch_size,
             max_records=args.max_records,
         )

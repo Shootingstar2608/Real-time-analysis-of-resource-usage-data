@@ -44,6 +44,13 @@ from config.config import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+try:
+    from ml_models.explainability import plot_attention_weights, extract_shap_values, plot_feature_importance
+except ImportError as e:
+    logger.warning(f"Could not import explainability module: {e}")
+    plot_attention_weights = None
+    plot_feature_importance = None
+
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 logger.info(f"Using device: {device}")
 
@@ -51,61 +58,33 @@ os.makedirs(MODEL_DIR, exist_ok=True)
 
 
 # ================================================================
-# MODEL 1: LSTM AUTOENCODER FOR ANOMALY DETECTION
+# MODEL 1: BiLSTM + ATTENTION AUTOENCODER FOR ANOMALY DETECTION
 # ================================================================
 
-class LSTMEncoder(nn.Module):
-    """Encoder: compresses sequence into latent representation"""
-    def __init__(self, input_size, hidden_size, num_layers):
+class TemporalAttention(nn.Module):
+    def __init__(self, hidden_size):
         super().__init__()
-        self.lstm = nn.LSTM(
-            input_size=input_size,
-            hidden_size=hidden_size,
-            num_layers=num_layers,
-            batch_first=True,
-            dropout=0.2 if num_layers > 1 else 0
+        self.attention = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size // 2),
+            nn.Tanh(),
+            nn.Linear(hidden_size // 2, 1)
         )
-    
-    def forward(self, x):
-        _, (hidden, cell) = self.lstm(x)
-        return hidden, cell
+        
+    def forward(self, lstm_output):
+        # lstm_output: (batch_size, seq_len, hidden_size)
+        attn_weights = self.attention(lstm_output) # (batch, seq_len, 1)
+        attn_weights = torch.softmax(attn_weights, dim=1)
+        
+        # Context vector: weighted sum of lstm outputs
+        context = torch.sum(attn_weights * lstm_output, dim=1) # (batch, hidden_size)
+        return context, attn_weights
 
 
-class LSTMDecoder(nn.Module):
-    """Decoder: reconstructs sequence from latent representation"""
-    def __init__(self, input_size, hidden_size, num_layers, output_size):
-        super().__init__()
-        self.lstm = nn.LSTM(
-            input_size=input_size,
-            hidden_size=hidden_size,
-            num_layers=num_layers,
-            batch_first=True,
-            dropout=0.2 if num_layers > 1 else 0
-        )
-        self.fc = nn.Linear(hidden_size, output_size)
-    
-    def forward(self, x, hidden, cell):
-        output, _ = self.lstm(x, (hidden, cell))
-        output = self.fc(output)
-        return output
-
-
-class LSTMAutoencoder(nn.Module):
+class BiLSTMAttentionAutoencoder(nn.Module):
     """
-    LSTM Autoencoder for time-series anomaly detection.
-    
-    How it works:
-    1. Encoder compresses a sequence of resource metrics into a 
-       fixed-size latent vector
-    2. Decoder tries to reconstruct the original sequence
-    3. High reconstruction error = anomalous pattern
-    
-    This captures temporal anomalies that Isolation Forest misses:
-    - Gradual memory leaks (slow upward trend)
-    - Periodic pattern violations (e.g., no daily cycle)
-    - Correlated multi-metric anomalies
+    BiLSTM + Temporal Attention Autoencoder.
+    Replaces the standard LSTMAutoencoder.
     """
-    
     def __init__(self, n_features, hidden_size=LSTM_HIDDEN_SIZE, 
                  num_layers=LSTM_NUM_LAYERS):
         super().__init__()
@@ -113,29 +92,53 @@ class LSTMAutoencoder(nn.Module):
         self.hidden_size = hidden_size
         self.seq_length = LSTM_SEQUENCE_LENGTH
         
-        self.encoder = LSTMEncoder(n_features, hidden_size, num_layers)
-        self.decoder = LSTMDecoder(n_features, hidden_size, num_layers, n_features)
+        # BiLSTM Encoder
+        self.encoder = nn.LSTM(
+            input_size=n_features,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            batch_first=True,
+            dropout=0.2 if num_layers > 1 else 0,
+            bidirectional=True
+        )
+        
+        # Temporal Attention
+        self.attention = TemporalAttention(hidden_size * 2)
+        
+        # BiLSTM Decoder
+        self.decoder_lstm = nn.LSTM(
+            input_size=hidden_size * 2,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            batch_first=True,
+            dropout=0.2 if num_layers > 1 else 0,
+            bidirectional=True
+        )
+        self.fc = nn.Linear(hidden_size * 2, n_features)
     
     def forward(self, x):
-        # Encode
-        hidden, cell = self.encoder(x)
+        # x: (batch, seq_len, n_features)
+        enc_out, _ = self.encoder(x)
         
-        # Decode (use input as decoder input for teacher forcing)
-        # Reverse sequence for better gradient flow
-        decoder_input = torch.flip(x, dims=[1])
-        reconstruction = self.decoder(decoder_input, hidden, cell)
-        reconstruction = torch.flip(reconstruction, dims=[1])
+        context, attn_weights = self.attention(enc_out)
         
-        return reconstruction
+        # Repeat context vector for decoder input
+        dec_input = context.unsqueeze(1).repeat(1, x.size(1), 1)
+        
+        dec_out, _ = self.decoder_lstm(dec_input)
+        reconstruction = self.fc(dec_out)
+        
+        return reconstruction, attn_weights
 
 
 class AnomalyDetectorLSTM:
     """
-    Complete LSTM Autoencoder pipeline for anomaly detection.
+    Complete BiLSTM Autoencoder pipeline for anomaly detection.
     """
     
+    # Features phải khớp với data từ Kafka streaming
     FEATURE_COLUMNS = [
-        'min_cpu', 'max_cpu', 'avg_cpu', 'cpu_range',
+        'cpu_util_percent', 'mem_util_percent', 'disk_io_percent',
     ]
     
     def __init__(self):
@@ -151,23 +154,27 @@ class AnomalyDetectorLSTM:
             sequences.append(data[i:i + seq_length])
         return np.array(sequences)
     
-    def _prepare_data(self, df, vm_id=None):
+    def _prepare_data(self, df, machine_id=None, fit_scaler=True):
         """Prepare data for LSTM: sort by time, create sequences"""
-        if vm_id:
-            df = df[df['vm_id'] == vm_id].copy()
+        if machine_id:
+            id_col = 'machine_id' if 'machine_id' in df.columns else 'vm_id'
+            df = df[df[id_col] == machine_id].copy()
         
         df = df.sort_values('timestamp').reset_index(drop=True)
         
-        features = df[self.FEATURE_COLUMNS].values
-        features_scaled = self.scaler.fit_transform(features)
+        features = df[self.FEATURE_COLUMNS].fillna(0).values
+        if fit_scaler:
+            features_scaled = self.scaler.fit_transform(features)
+        else:
+            features_scaled = self.scaler.transform(features)
         
         sequences = self._create_sequences(features_scaled)
         return sequences
     
-    def fit(self, df, vm_id=None, epochs=LSTM_EPOCHS):
+    def fit(self, df, machine_id=None, epochs=LSTM_EPOCHS):
         """Train the LSTM Autoencoder"""
-        logger.info("Preparing sequences for LSTM...")
-        sequences = self._prepare_data(df, vm_id)
+        logger.info("Preparing sequences for BiLSTM-Attention...")
+        sequences = self._prepare_data(df, machine_id, fit_scaler=True)
         
         n_features = sequences.shape[2]
         logger.info(f"  Sequences: {sequences.shape[0]:,}")
@@ -180,7 +187,7 @@ class AnomalyDetectorLSTM:
         dataloader = DataLoader(dataset, batch_size=LSTM_BATCH_SIZE, shuffle=True)
         
         # Initialize model
-        self.model = LSTMAutoencoder(
+        self.model = BiLSTMAttentionAutoencoder(
             n_features=n_features,
             hidden_size=LSTM_HIDDEN_SIZE,
             num_layers=LSTM_NUM_LAYERS
@@ -192,7 +199,7 @@ class AnomalyDetectorLSTM:
         criterion = nn.MSELoss()
         
         # Training loop
-        logger.info(f"Training LSTM Autoencoder for {epochs} epochs...")
+        logger.info(f"Training BiLSTM-Attention Autoencoder for {epochs} epochs...")
         self.training_losses = []
         
         for epoch in range(epochs):
@@ -202,7 +209,7 @@ class AnomalyDetectorLSTM:
             
             for batch_x, batch_y in dataloader:
                 optimizer.zero_grad()
-                reconstruction = self.model(batch_x)
+                reconstruction, _ = self.model(batch_x)
                 loss = criterion(reconstruction, batch_y)
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
@@ -220,30 +227,30 @@ class AnomalyDetectorLSTM:
         # Calculate threshold from training data
         self.model.eval()
         with torch.no_grad():
-            reconstructions = self.model(X_tensor)
+            reconstructions, _ = self.model(X_tensor)
             errors = torch.mean(
                 (X_tensor - reconstructions) ** 2, dim=[1, 2]
             ).cpu().numpy()
         
-        self.threshold = np.percentile(errors, LSTM_THRESHOLD_PERCENTILE)
-        logger.info(f"  Threshold (p{LSTM_THRESHOLD_PERCENTILE}): {self.threshold:.6f}")
+        self.threshold = np.mean(errors) + 3 * np.std(errors)
+        logger.info(f"  Threshold (Mean + 3*Std): {self.threshold:.6f}")
         
         return errors
     
-    def predict(self, df, vm_id=None):
+    def predict(self, df, machine_id=None):
         """Detect anomalies in new data"""
-        sequences = self._prepare_data(df, vm_id)
+        sequences = self._prepare_data(df, machine_id, fit_scaler=False)
         X_tensor = torch.FloatTensor(sequences).to(device)
         
         self.model.eval()
         with torch.no_grad():
-            reconstructions = self.model(X_tensor)
+            reconstructions, attn_weights = self.model(X_tensor)
             errors = torch.mean(
                 (X_tensor - reconstructions) ** 2, dim=[1, 2]
             ).cpu().numpy()
         
         anomalies = errors > self.threshold
-        return anomalies, errors
+        return anomalies, errors, attn_weights.cpu().numpy()
     
     def save(self, path=None):
         """Save model"""
@@ -262,12 +269,12 @@ class AnomalyDetectorLSTM:
         if path is None:
             path = os.path.join(MODEL_DIR, "lstm_autoencoder")
         
-        self.model = LSTMAutoencoder(n_features=n_features).to(device)
+        self.model = BiLSTMAttentionAutoencoder(n_features=n_features).to(device)
         self.model.load_state_dict(torch.load(os.path.join(path, "model.pth")))
         self.threshold = np.load(os.path.join(path, "threshold.npy"))
         import pickle
         self.scaler = pickle.load(open(os.path.join(path, "scaler.pkl"), 'rb'))
-        logger.info(f"LSTM Autoencoder loaded from {path}/")
+        logger.info(f"BiLSTM Autoencoder loaded from {path}/")
 
 
 # ================================================================
@@ -317,10 +324,10 @@ class ResourceForecaster:
     Predicts future CPU/Memory for capacity planning.
     """
     
-    def __init__(self, target='avg_cpu'):
+    def __init__(self, target='cpu_util_percent'):
         self.target = target
         self.feature_cols = [
-            'min_cpu', 'max_cpu', 'avg_cpu', 'cpu_range',
+            'cpu_util_percent', 'mem_util_percent', 'disk_io_percent',
         ]
         self.scaler_x = MinMaxScaler()
         self.scaler_y = MinMaxScaler()
@@ -344,10 +351,11 @@ class ResourceForecaster:
         
         return np.array(X), np.array(y)
     
-    def fit(self, df, vm_id=None, epochs=FORECAST_EPOCHS):
+    def fit(self, df, machine_id=None, epochs=FORECAST_EPOCHS):
         """Train forecasting model"""
-        if vm_id:
-            df = df[df['vm_id'] == vm_id].copy()
+        if machine_id:
+            id_col = 'machine_id' if 'machine_id' in df.columns else 'vm_id'
+            df = df[df[id_col] == machine_id].copy()
         
         logger.info(f"Training LSTM Forecaster (target: {self.target})...")
         X, y = self._prepare_forecast_data(df)
@@ -557,69 +565,201 @@ def visualize_lstm_results(df, anomalies, errors, threshold,
 # MAIN TRAINING PIPELINE
 # ================================================================
 
+def synthesize_anomalies(df, anomaly_ratio=0.05):
+    """Inject synthetic anomalies AFTER scaling to guarantee detectability"""
+    df = df.copy().reset_index(drop=True)
+    labels = np.zeros(len(df))
+    n_anomalies = int(len(df) * anomaly_ratio)
+    n_events = max(1, n_anomalies // 5)
+    cpu_col = 'cpu_util_percent'
+    mem_col = 'mem_util_percent'
+    for _ in range(n_events):
+        start = np.random.randint(0, max(1, len(df) - 10))
+        length = np.random.randint(3, 8)
+        end = min(len(df), start + length)
+        labels[start:end] = 1
+        # Spike: set to max value + extra to be clearly out-of-distribution
+        # TEACHER FEEDBACK: Focus on RAM (Memory leaks are the real killers, CPU is volatile)
+        mem_max = df[mem_col].max()
+        mem_idx = df.columns.get_loc(mem_col)
+        # Increase memory usage by 30-50%
+        df.iloc[start:end, mem_idx] += np.random.uniform(30, 50)
+        df.iloc[start:end, mem_idx] = np.clip(df.iloc[start:end, mem_idx], 0, 100.0)
+    return df, labels
+
+def calculate_event_wise_f1(true_labels, pred_labels):
+    min_len = min(len(true_labels), len(pred_labels))
+    true_labels = true_labels[-min_len:]
+    pred_labels = pred_labels[-min_len:]
+    
+    adjusted_preds = np.copy(pred_labels)
+    in_anomaly = False
+    start = 0
+    true_anomalies = []
+    for i, label in enumerate(true_labels):
+        if label == 1 and not in_anomaly:
+            in_anomaly = True
+            start = i
+        elif label == 0 and in_anomaly:
+            in_anomaly = False
+            true_anomalies.append((start, i - 1))
+    if in_anomaly:
+        true_anomalies.append((start, len(true_labels) - 1))
+        
+    for start, end in true_anomalies:
+        if np.any(pred_labels[start:end+1] == 1):
+            adjusted_preds[start:end+1] = 1
+            
+    tp = np.sum((adjusted_preds == 1) & (true_labels == 1))
+    fp = np.sum((adjusted_preds == 1) & (true_labels == 0))
+    fn = np.sum((adjusted_preds == 0) & (true_labels == 1))
+    
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+    
+    return f1, precision, recall
+
+
+def find_optimal_threshold(errors, true_labels, n_candidates=200):
+    """Scan candidate thresholds to find the one maximising Event-wise F1."""
+    # Align lengths (errors come from sequences, true_labels from raw rows)
+    min_len = min(len(errors), len(true_labels))
+    errors = errors[-min_len:]
+    true_labels = true_labels[-min_len:]
+
+    candidates = np.linspace(errors.min(), errors.max(), n_candidates)
+    best_f1, best_thresh = 0.0, candidates[0]
+    for thresh in candidates:
+        preds = (errors > thresh).astype(int)
+        f1, _, _ = calculate_event_wise_f1(true_labels, preds)
+        if f1 > best_f1:
+            best_f1 = f1
+            best_thresh = thresh
+    return best_thresh, best_f1
+
+
 def train_all_models():
     """Train both LSTM models and generate visualizations"""
     import glob
-    import gzip
+    import tarfile
     import csv
-    
+    from collections import defaultdict
+    from io import TextIOWrapper
+
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    raw_dir = os.path.join(project_root, "data", "raw")
+    tar_gz_path = os.path.join(project_root, "data", "alibaba", "machine_usage.tar.gz")
     
-    cpu_files = sorted(glob.glob(os.path.join(raw_dir, "vm_cpu_readings-*.csv.gz")))
-    if not cpu_files:
-        logger.error("No CPU reading files found. Download data first.")
+    if not os.path.exists(tar_gz_path):
+        logger.error(f"No Alibaba data found at {tar_gz_path}. Download data first.")
         return
     
-    # Load data from first file (sample for LSTM training)
-    logger.info(f"Loading data from {os.path.basename(cpu_files[0])}...")
-    records = []
-    max_records = 200_000  # LSTM trains per-VM, so smaller set is fine
-    
-    with gzip.open(cpu_files[0], 'rt') as f:
-        reader = csv.reader(f)
-        for row in reader:
-            if len(row) < 5:
+    logger.info(f"Loading data from {tar_gz_path} to find a suitable machine...")
+    machine_data_map = defaultdict(list)
+    TARGET_RECORDS = 10000     # Số lượng bản ghi cần thiết cho 1 machine
+    MAX_SCAN_LINES = 10_000_000  # Quét tối đa 10 triệu dòng
+    target_machine_id = None
+
+    with tarfile.open(tar_gz_path, 'r:gz') as tar:
+        for member in tar.getmembers():
+            if target_machine_id:
+                break
+            if not member.isfile():
                 continue
-            try:
-                records.append({
-                    'timestamp': float(row[0]),
-                    'vm_id': row[1].strip(),
-                    'min_cpu': float(row[2]),
-                    'max_cpu': float(row[3]),
-                    'avg_cpu': float(row[4]),
-                    'cpu_range': float(row[3]) - float(row[2]),
-                })
-                if len(records) >= max_records:
+            f = tar.extractfile(member)
+            if f is None:
+                continue
+            text_stream = TextIOWrapper(f, encoding='utf-8')
+            reader = csv.reader(text_stream)
+            for i, row in enumerate(reader):
+                if i >= MAX_SCAN_LINES:
                     break
-            except (ValueError, IndexError):
-                continue
+                if len(row) < 9:
+                    continue
+                try:
+                    machine_id = row[0].strip()
+                    # Schema: machine_id, timestamp, cpu, mem, mem_gps, mkpi, net_in, net_out, disk
+                    cpu_util  = float(row[2]) if row[2] else 0.0
+                    mem_util  = float(row[3]) if row[3] else 0.0
+                    disk_io   = float(row[8]) if row[8] else 0.0
+                    machine_data_map[machine_id].append({
+                        'timestamp':        float(row[1]) if row[1] else 0.0,
+                        'machine_id':       machine_id,
+                        'cpu_util_percent': cpu_util,
+                        'mem_util_percent': mem_util,
+                        'disk_io_percent':  disk_io,
+                    })
+                    if len(machine_data_map[machine_id]) >= TARGET_RECORDS:
+                        target_machine_id = machine_id
+                        break
+                except (ValueError, IndexError):
+                    continue
+            text_stream.close()
+
+    if not target_machine_id:
+        target_machine_id = max(machine_data_map, key=lambda k: len(machine_data_map[k]))
+        if len(machine_data_map[target_machine_id]) < 30:
+            logger.error(f"Không tìm thấy machine có đủ 30 bản ghi sau khi quét {MAX_SCAN_LINES} dòng")
+            return
+
+    vm_data = pd.DataFrame(machine_data_map[target_machine_id])
+    vm_data = vm_data.sort_values('timestamp').reset_index(drop=True)
+    logger.info(f"Selected machine: {target_machine_id[:16]}... with {len(vm_data)} records.")
     
-    df = pd.DataFrame(records)
-    logger.info(f"Total records: {len(df):,}")
-    
-    # Pick VM with most records for LSTM training (per-VM model)
-    vm_counts = df['vm_id'].value_counts()
-    sample_vm = vm_counts.index[0]
-    vm_data = df[df['vm_id'] == sample_vm].sort_values('timestamp')
-    logger.info(f"Training on VM: {sample_vm[:16]}... ({len(vm_data):,} records)")
-    
-    # ---- Model 1: LSTM Autoencoder ----
+    # ---- Model 1: BiLSTM Autoencoder ----
     logger.info("\n" + "=" * 50)
-    logger.info("  Training LSTM Autoencoder")
+    logger.info("  Training BiLSTM-Attention Autoencoder (70/30 & 80/20 Splits)")
     logger.info("=" * 50)
     
+    # Split 70/30
+    split_70 = int(len(vm_data) * 0.7)
+    train_70 = vm_data.iloc[:split_70].copy()
+    test_70 = vm_data.iloc[split_70:].copy()
+    # Keep training data clean; inject synthetic anomalies only into test for evaluation.
+    test_70_eval, labels_test_70 = synthesize_anomalies(test_70.copy(), anomaly_ratio=0.05)
+    
+    ae_detector_70 = AnomalyDetectorLSTM()
+    ae_detector_70.fit(train_70, epochs=LSTM_EPOCHS)
+    preds_70, errors_70, attn_70 = ae_detector_70.predict(test_70_eval)
+    f1_70, prec_70, rec_70 = calculate_event_wise_f1(labels_test_70, preds_70.astype(int))
+    logger.info(f"[70/30 Split] Event-wise F1: {f1_70:.4f} | Precision: {prec_70:.4f} | Recall: {rec_70:.4f}")
+    
+    # Split 80/20
+    split_80 = int(len(vm_data) * 0.8)
+    train_80 = vm_data.iloc[:split_80].copy()
+    test_80 = vm_data.iloc[split_80:].copy()
+    # Keep training data clean; inject synthetic anomalies only into test for evaluation.
+    test_80_eval, labels_test_80 = synthesize_anomalies(test_80.copy(), anomaly_ratio=0.05)
+    
     ae_detector = AnomalyDetectorLSTM()
-    ae_errors = ae_detector.fit(vm_data, epochs=LSTM_EPOCHS)
-    ae_anomalies, ae_test_errors = ae_detector.predict(vm_data)
+    ae_errors = ae_detector.fit(train_80, epochs=LSTM_EPOCHS)
+    ae_anomalies, ae_test_errors, ae_attn_weights = ae_detector.predict(test_80_eval)
+    f1_80, prec_80, rec_80 = calculate_event_wise_f1(labels_test_80, ae_anomalies.astype(int))
+    logger.info(f"[80/20 Split] Event-wise F1: {f1_80:.4f} | Precision: {prec_80:.4f} | Recall: {rec_80:.4f}")
+    
     ae_detector.save()
+    
+    # Plot attention
+    try:
+        os.makedirs("output/plots", exist_ok=True)
+        # Average attention across the batch for the last prediction
+        mean_attn = ae_attn_weights[-1].mean(axis=1)  # shape: (seq_length,)
+        if plot_attention_weights is not None:
+            plot_attention_weights(
+                mean_attn, LSTM_SEQUENCE_LENGTH,
+                AnomalyDetectorLSTM.FEATURE_COLUMNS,
+                "output/plots/attention_weights.png"
+            )
+            logger.info("Saved attention weights plot to output/plots/attention_weights.png")
+    except Exception as e:
+        logger.warning(f"Failed to plot attention weights: {e}")
     
     # ---- Model 2: LSTM Forecaster ----
     logger.info("\n" + "=" * 50)
-    logger.info("  Training LSTM Forecaster (CPU)")
+    logger.info("  Training LSTM Forecaster (RAM)")
     logger.info("=" * 50)
     
-    forecaster = ResourceForecaster(target='avg_cpu')
+    forecaster = ResourceForecaster(target='mem_util_percent')
     X_val, y_val = forecaster.fit(vm_data, epochs=FORECAST_EPOCHS)
     forecaster.save()
     

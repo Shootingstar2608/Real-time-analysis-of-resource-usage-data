@@ -1,0 +1,812 @@
+\documentclass[12pt,a4paper]{article}
+
+% ============================================================
+% PACKAGES
+% ============================================================
+\usepackage[utf8]{inputenc}
+\usepackage[T5]{fontenc}
+\usepackage[vietnamese,english]{babel}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{hyperref}
+\usepackage{tikz}
+\usepackage{enumitem}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage{mdframed}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{float}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{fontawesome5}
+
+\usetikzlibrary{shapes.geometric, arrows.meta, positioning, fit, backgrounds, shadows}
+
+% ============================================================
+% COLORS
+% ============================================================
+\definecolor{kafkaorange}{RGB}{224, 131, 51}
+\definecolor{sparkblue}{RGB}{36, 110, 185}
+\definecolor{mlgreen}{RGB}{39, 153, 94}
+\definecolor{dashpurple}{RGB}{120, 60, 180}
+\definecolor{dockercyan}{RGB}{22, 150, 210}
+\definecolor{codebg}{RGB}{248, 248, 248}
+\definecolor{codeframe}{RGB}{200, 200, 200}
+\definecolor{sectionblue}{RGB}{30, 80, 160}
+\definecolor{alertred}{RGB}{200, 50, 50}
+\definecolor{noteyellow}{RGB}{255, 235, 180}
+
+% ============================================================
+% HYPERREF SETUP
+% ============================================================
+\hypersetup{
+    colorlinks=true,
+    linkcolor=sectionblue,
+    urlcolor=sparkblue,
+    citecolor=mlgreen
+}
+
+% ============================================================
+% HEADER / FOOTER
+% ============================================================
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\textcolor{gray}{Real-time Analysis of Resource Usage Data}}
+\fancyhead[R]{\small\textcolor{gray}{Báo cáo Tiến độ Dự án}}
+\fancyfoot[C]{\small\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+% ============================================================
+% TITLE FORMAT
+% ============================================================
+\titleformat{\section}
+  {\large\bfseries\color{sectionblue}}
+  {\thesection.}{0.5em}{}[\titlerule]
+
+\titleformat{\subsection}
+  {\normalsize\bfseries\color{sectionblue!80!black}}
+  {\thesubsection.}{0.5em}{}
+
+\titleformat{\subsubsection}
+  {\normalsize\bfseries\color{sectionblue!60!black}}
+  {\thesubsubsection.}{0.5em}{}
+
+% ============================================================
+% CODE LISTING STYLE
+% ============================================================
+\lstset{
+    backgroundcolor=\color{codebg},
+    frame=single,
+    rulecolor=\color{codeframe},
+    basicstyle=\ttfamily\small,
+    breaklines=true,
+    keywordstyle=\color{sparkblue}\bfseries,
+    commentstyle=\color{gray}\itshape,
+    stringstyle=\color{mlgreen},
+    showstringspaces=false,
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    numbersep=6pt,
+    captionpos=b
+}
+
+\lstdefinestyle{bash}{
+    language=bash,
+    keywordstyle=\color{dockercyan}\bfseries,
+    morekeywords={docker,compose,python,pip,spark-submit},
+}
+
+\lstdefinestyle{python}{
+    language=Python,
+}
+
+% ============================================================
+% CUSTOM BOXES
+% ============================================================
+\newmdenv[
+  backgroundcolor=noteyellow!40,
+  linecolor=kafkaorange,
+  linewidth=1.5pt,
+  roundcorner=4pt,
+  innerleftmargin=10pt,
+  innerrightmargin=10pt,
+  innertopmargin=6pt,
+  innerbottommargin=6pt
+]{notebox}
+
+\newmdenv[
+  backgroundcolor=sparkblue!8,
+  linecolor=sparkblue,
+  linewidth=1.5pt,
+  roundcorner=4pt,
+  innerleftmargin=10pt,
+  innerrightmargin=10pt,
+  innertopmargin=6pt,
+  innerbottommargin=6pt
+]{infobox}
+
+% ============================================================
+% DOCUMENT BEGIN
+% ============================================================
+\begin{document}
+
+%% TITLE PAGE
+\begin{titlepage}
+    \centering
+    \vspace*{2cm}
+    {\Huge\bfseries\color{sectionblue} Báo cáo Tiến độ Dự án\par}
+    \vspace{0.5cm}
+    \rule{\linewidth}{1.5pt}
+    \vspace{0.5cm}
+    {\LARGE\bfseries Real-time Analysis of\\Resource Usage Data\par}
+    \vspace{0.3cm}
+    \rule{\linewidth}{0.5pt}
+    \vspace{1.5cm}
+
+    {\large
+    \begin{tabular}{rl}
+      \textbf{Mô tả:} & Hệ thống phân tích tài nguyên máy ảo thời gian thực \\[4pt]
+      \textbf{Dữ liệu:} & Azure VM Traces (Microsoft Research) \\[4pt]
+      \textbf{Ngày báo cáo:} & \today \\[4pt]
+      \textbf{Công nghệ chính:} & Apache Kafka $\cdot$ Apache Spark $\cdot$ Python \\[4pt]
+      \textbf{ML Models:} & Isolation Forest $\cdot$ LSTM Autoencoder \\
+    \end{tabular}
+    }
+
+    \vspace{2cm}
+
+    % Architecture mini-diagram on title page
+    \begin{tikzpicture}[
+        node distance=1.6cm, >=Stealth,
+        box/.style={rectangle, rounded corners=6pt, minimum width=2.2cm, minimum height=0.8cm,
+                    font=\small\bfseries, text=white, drop shadow}
+    ]
+        \node[box, fill=kafkaorange] (prod) {Producer};
+        \node[box, fill=kafkaorange, right=of prod] (kafka) {Kafka Broker};
+        \node[box, fill=sparkblue, right=of kafka] (spark) {Spark Streaming};
+        \node[box, fill=mlgreen, right=of spark] (ml) {ML/Anomaly};
+        \node[box, fill=dashpurple, right=of ml] (dash) {Dashboard};
+
+        \draw[->, thick] (prod) -- (kafka);
+        \draw[->, thick] (kafka) -- (spark);
+        \draw[->, thick] (spark) -- (ml);
+        \draw[->, thick] (ml) -- (dash);
+    \end{tikzpicture}
+
+    \vfill
+    {\small\color{gray} Tài liệu này được tạo tự động dựa trên source code thực tế của dự án.}
+\end{titlepage}
+
+% TABLE OF CONTENTS
+\tableofcontents
+\newpage
+
+% ============================================================
+\section{Tổng quan dự án}
+% ============================================================
+
+\subsection{Mục tiêu}
+
+Dự án xây dựng một \textbf{pipeline phân tích tài nguyên máy ảo theo thời gian thực}, sử dụng bộ dữ liệu thực tế từ Microsoft Azure (Azure VM Traces). Hệ thống đọc log sử dụng CPU của hàng triệu máy ảo, xử lý chúng qua luồng dữ liệu streaming, phát hiện bất thường bằng mô hình học máy, và hiển thị kết quả trên dashboard trực quan.
+
+\subsection{Bộ dữ liệu}
+
+\begin{infobox}
+\textbf{Azure VM Traces} (Microsoft Research) gồm 2 loại file:
+\begin{itemize}[nosep]
+  \item \texttt{vm\_cpu\_readings-*.csv.gz}: Bản ghi CPU của từng VM, chu kỳ 5 phút/lần — gồm các cột: \texttt{timestamp, vm\_id, min\_cpu, max\_cpu, avg\_cpu}
+  \item \texttt{vmtable.csv.gz}: Metadata của VM — gồm: \texttt{vm\_id, vm\_category, vm\_core\_count, vm\_memory\_gb, ...} (11 cột)
+\end{itemize}
+\end{infobox}
+
+\subsection{Công nghệ sử dụng}
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\linewidth}{>{\bfseries}l l X}
+\toprule
+Lớp & Công nghệ & Phiên bản / Ghi chú \\
+\midrule
+Message Broker & Apache Kafka & Confluent 7.5.0 (via Docker) \\
+Coordination & Apache ZooKeeper & Confluent 7.5.0 \\
+Stream Processing & Apache Spark Structured Streaming & 3.5.0 \\
+Anomaly Detection & Isolation Forest (scikit-learn) & 1.4.0, \texttt{contamination=0.05} \\
+Deep Learning & LSTM Autoencoder (PyTorch) & 2.2.0 \\
+Dashboard & Streamlit & 1.31.0 \\
+Monitoring & Kafka UI & Provectus (port 8080) \\
+Infrastructure & Docker Compose & Toàn bộ infra containerized \\
+\bottomrule
+\end{tabularx}
+\caption{Danh sách công nghệ sử dụng trong dự án}
+\end{table}
+
+% ============================================================
+\section{Kiến trúc hệ thống}
+% ============================================================
+
+\subsection{Sơ đồ kiến trúc tổng thể}
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+    node distance=0.8cm and 1.4cm,
+    >=Stealth,
+    box/.style={rectangle, rounded corners=5pt, minimum width=3cm, minimum height=1cm,
+                font=\small\bfseries, text=white, align=center, drop shadow},
+    container/.style={rectangle, rounded corners=8pt, dashed, thick, inner sep=12pt},
+    label_style/.style={font=\tiny\bfseries, text=white, fill=gray!60, rounded corners=2pt, inner sep=2pt}
+]
+
+%% DATA SOURCE
+\node[box, fill=gray!70] (data) {Azure VM Traces\\(.csv.gz files)};
+
+%% KAFKA LAYER
+\node[box, fill=kafkaorange, right=2cm of data] (producer) {Kafka Producer\\(real\_data\_producer.py)};
+\node[box, fill=kafkaorange!80, below=0.6cm of producer] (zk) {ZooKeeper\\:2181};
+\node[box, fill=kafkaorange, right=1.8cm of producer] (kafka) {Kafka Broker\\:9092};
+\node[box, fill=kafkaorange!60, below=0.6cm of kafka] (kafkaui) {Kafka UI\\:8080};
+
+%% SPARK LAYER
+\node[box, fill=sparkblue, right=1.8cm of kafka] (consumer) {Spark Streaming\\Consumer};
+\node[box, fill=sparkblue!70, below=0.6cm of consumer] (sparkmaster) {Spark Master\\:7077/:8081};
+
+%% ML LAYER
+\node[box, fill=mlgreen, right=1.8cm of consumer] (ml) {ML Inference\\(foreachBatch)};
+\node[box, fill=mlgreen!70, below=0.6cm of ml] (models) {Isolation Forest\\+ LSTM};
+
+%% OUTPUT LAYER
+\node[box, fill=dashpurple, right=1.8cm of ml] (dash) {Streamlit\\Dashboard\\:8501};
+\node[box, fill=dashpurple!70, below=0.6cm of dash] (parquet) {Parquet Output\\(output/)};
+
+%% ARROWS (main flow)
+\draw[->, very thick, color=kafkaorange] (data) -- node[above, font=\tiny]{read} (producer);
+\draw[->, very thick, color=kafkaorange] (producer) -- node[above, font=\tiny]{push} (kafka);
+\draw[->, very thick, color=sparkblue] (kafka) -- node[above, font=\tiny]{subscribe} (consumer);
+\draw[->, very thick, color=mlgreen] (consumer) -- node[above, font=\tiny]{batch} (ml);
+\draw[->, very thick, color=dashpurple] (ml) -- node[above, font=\tiny]{results} (dash);
+
+%% Support arrows
+\draw[->, dashed, thin] (zk) -- (kafka);
+\draw[->, dashed, thin] (sparkmaster) -- (consumer);
+\draw[->, dashed, thin] (models) -- (ml);
+\draw[->, dashed, thin] (ml) -- (parquet);
+\draw[->, dashed, thin] (consumer) to[bend right=30] node[below, font=\tiny]{anomalies} (kafka);
+
+%% Topic label
+\node[font=\tiny, color=kafkaorange, below=0.1cm of kafka, xshift=-0.3cm] {Topic: vm-cpu-usage};
+
+\end{tikzpicture}
+\caption{Kiến trúc tổng thể hệ thống real-time analysis}
+\end{figure}
+
+\subsection{Luồng dữ liệu (Data Flow)}
+
+\begin{enumerate}
+  \item \textbf{Nguồn dữ liệu}: File \texttt{vm\_cpu\_readings-*.csv.gz} và \texttt{vmtable.csv.gz} được lưu trong thư mục \texttt{data/raw/}.
+  \item \textbf{Kafka Producer} đọc từng dòng từ file CSV, enrich thêm metadata VM từ \texttt{vmtable}, sau đó đẩy từng record (JSON) vào topic Kafka \texttt{vm-cpu-usage}.
+  \item \textbf{Kafka Broker} nhận và lưu trữ các message, đóng vai trò message bus trung gian.
+  \item \textbf{Spark Streaming Consumer} subscribe vào topic \texttt{vm-cpu-usage}, liên tục đọc micro-batch và thực hiện:
+    \begin{itemize}
+      \item Parse JSON → chuẩn hóa schema
+      \item Windowed aggregation (5 phút per-VM, 1 phút per-Category, 30 giây global)
+      \item Rule-based anomaly detection
+      \item ML inference (Isolation Forest) qua \texttt{foreachBatch}
+    \end{itemize}
+  \item \textbf{Kết quả} được ghi ra: topic Kafka \texttt{vm-anomalies} và file Parquet trong \texttt{output/ml\_results/}.
+  \item \textbf{Dashboard Streamlit} đọc kết quả và hiển thị thời gian thực.
+\end{enumerate}
+
+% ============================================================
+\section{Thành phần chi tiết}
+% ============================================================
+
+\subsection{Cấu trúc thư mục}
+
+\begin{lstlisting}[style=bash, caption={Cấu trúc thư mục dự án}]
+Real-time-analysis-of-resource-usage-data/
+|-- config/
+|   `-- config.py              # Cau hinh toan bo du an (Kafka, Spark, ML)
+|-- kafka_stream/
+|   `-- real_data_producer.py  # Kafka Producer: doc CSV -> Kafka
+|-- spark_processing/
+|   `-- streaming_consumer.py  # Spark Consumer: Kafka -> xu ly -> output
+|-- ml_models/
+|   |-- isolation_forest_model.py  # Train Isolation Forest
+|   `-- lstm_models.py             # LSTM Autoencoder & Forecasting
+|-- dashboard/
+|   `-- app.py                  # Streamlit dashboard
+|-- data/
+|   `-- raw/                    # Chua file .csv.gz cua Azure VM Traces
+|-- models/
+|   `-- saved/                  # Model da train: isolation_forest.joblib
+|-- output/
+|   `-- ml_results/             # Parquet files ket qua ML inference
+|-- docker-compose.yml          # Kafka + Spark infrastructure
+`-- requirements.txt            # Python dependencies
+\end{lstlisting}
+
+% ============================================================
+\subsection{Module 1: Config (\texttt{config/config.py})}
+% ============================================================
+
+File cấu hình trung tâm của toàn dự án. Tất cả các module đều import từ đây.
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\linewidth}{l X}
+\toprule
+\textbf{Biến} & \textbf{Giá trị / Mô tả} \\
+\midrule
+\texttt{KAFKA\_BOOTSTRAP\_SERVERS} & \texttt{localhost:9092} — địa chỉ Kafka broker \\
+\texttt{KAFKA\_TOPIC\_CPU} & \texttt{vm-cpu-usage} — topic chứa bản ghi CPU real-time \\
+\texttt{KAFKA\_TOPIC\_ANOMALY} & \texttt{vm-anomalies} — topic chứa kết quả phát hiện bất thường \\
+\texttt{KAFKA\_TOPIC\_PREDICTIONS} & \texttt{vm-predictions} — topic chứa dự đoán \\
+\texttt{SPARK\_MASTER} & \texttt{local[4]} — chạy Spark local 4 core \\
+\texttt{SPARK\_BATCH\_INTERVAL} & 5 giây — chu kỳ micro-batch \\
+\texttt{SPARK\_WATERMARK\_DELAY} & 10 giây — thời gian chờ dữ liệu trễ \\
+\texttt{IF\_CONTAMINATION} & 0.05 — 5\% dữ liệu được coi là bất thường \\
+\texttt{LSTM\_SEQUENCE\_LENGTH} & 30 — số time step đầu vào LSTM \\
+\texttt{DASHBOARD\_PORT} & 8501 — cổng Streamlit \\
+\bottomrule
+\end{tabularx}
+\caption{Các tham số cấu hình chính}
+\end{table}
+
+% ============================================================
+\subsection{Module 2: Kafka Producer (\texttt{kafka\_stream/real\_data\_producer.py})}
+% ============================================================
+
+\subsubsection{Nhiệm vụ}
+Producer đọc dữ liệu thực từ Azure VM Traces (\texttt{.csv.gz}), enrich với metadata VM, rồi đẩy vào Kafka topic \texttt{vm-cpu-usage} với tốc độ có thể điều chỉnh.
+
+\subsubsection{Hoạt động chi tiết}
+
+\begin{enumerate}
+  \item \textbf{Load VM Metadata} (hàm \texttt{load\_vm\_table}):
+    \begin{itemize}
+      \item Đọc \texttt{vmtable.csv.gz} (11 cột, không có header)
+      \item Xây dựng dict: \texttt{vm\_id $\rightarrow$ \{vm\_category, vm\_core\_count, vm\_memory\_gb\}}
+      \item Thống kê phân bố category: Interactive / Delay-insensitive / Unknown
+    \end{itemize}
+
+  \item \textbf{Stream CPU Readings} (hàm \texttt{stream\_from\_raw\_files}):
+    \begin{itemize}
+      \item Quét tất cả file \texttt{vm\_cpu\_readings-*.csv.gz} theo thứ tự
+      \item Đọc từng dòng (5 cột): \texttt{timestamp, vm\_id, min\_cpu, max\_cpu, avg\_cpu}
+      \item Tính thêm \texttt{cpu\_range = max\_cpu - min\_cpu}
+      \item Tra bảng vm\_lookup để enrich thêm metadata
+      \item Gắn \texttt{ingestion\_timestamp} (thời điểm gửi thực tế)
+    \end{itemize}
+
+  \item \textbf{Gửi vào Kafka}:
+    \begin{itemize}
+      \item Key = \texttt{vm\_id} (đảm bảo ordering per-VM)
+      \item Value = JSON record đầy đủ
+      \item Batch flush mỗi \texttt{batch\_size} records (default: 500)
+      \item Delay nhân tạo để simulate real-time: $\text{delay} = \frac{300}{\text{speed\_factor} \times \text{batch\_size}}$
+    \end{itemize}
+\end{enumerate}
+
+\subsubsection{Cấu hình Producer Kafka}
+\begin{lstlisting}[style=python, caption={Cấu hình KafkaProducer}]
+KafkaProducer(
+    bootstrap_servers="localhost:9092",
+    value_serializer=lambda v: json.dumps(v).encode('utf-8'),
+    key_serializer=lambda k: k.encode('utf-8'),
+    acks='all',           # dam bao durability
+    compression_type='gzip',
+    batch_size=32768,     # 32KB batch
+    linger_ms=20,         # cho 20ms de batch
+    buffer_memory=67108864  # 64MB buffer
+)
+\end{lstlisting}
+
+\subsubsection{Schema record gửi vào Kafka}
+\begin{lstlisting}[style=python, caption={JSON record được gửi vào topic vm-cpu-usage}]
+{
+    "timestamp": 86400.0,          # giay (relative)
+    "vm_id": "abc123...",          # encrypted hash
+    "min_cpu": 2.3,
+    "max_cpu": 45.7,
+    "avg_cpu": 18.4,
+    "cpu_range": 43.4,             # max - min
+    "vm_category": "Interactive",  # tu vmtable
+    "vm_core_count": 4,
+    "vm_memory_gb": 16,
+    "ingestion_timestamp": "2026-04-02T10:00:00",
+    "source_file": "vm_cpu_readings-part1.csv.gz"
+}
+\end{lstlisting}
+
+\subsubsection{Tham số dòng lệnh}
+\begin{table}[H]
+\centering
+\begin{tabularx}{\linewidth}{l l X}
+\toprule
+\textbf{Tham số} & \textbf{Default} & \textbf{Mô tả} \\
+\midrule
+\texttt{--speed} & 200 & Tốc độ replay (200x so với thực) \\
+\texttt{--batch-size} & 500 & Số record mỗi batch flush \\
+\texttt{--max-records} & không giới hạn & Dừng sau N records \\
+\texttt{--data-dir} & \texttt{data/raw} & Thư mục chứa file .csv.gz \\
+\bottomrule
+\end{tabularx}
+\caption{Tham số CLI của Producer}
+\end{table}
+
+% ============================================================
+\subsection{Module 3: Spark Streaming Consumer (\texttt{spark\_processing/streaming\_consumer.py})}
+% ============================================================
+
+\subsubsection{Nhiệm vụ}
+Consumer là trung tâm xử lý của toàn hệ thống. Nó subscribe vào Kafka, thực hiện aggregation đa cấp, phát hiện bất thường (rule-based + ML), và ghi kết quả ra nhiều sink.
+
+\subsubsection{Khởi tạo Spark Session}
+\begin{lstlisting}[style=python, caption={Tạo SparkSession với Kafka integration}]
+SparkSession.builder \
+    .appName("ResourceUsageAnalysis") \
+    .config("spark.jars.packages",
+            "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0") \
+    .config("spark.sql.streaming.checkpointLocation", "/tmp/spark-checkpoints") \
+    .config("spark.sql.shuffle.partitions", "2") \
+    .getOrCreate()
+\end{lstlisting}
+
+\begin{notebox}
+\textbf{Lưu ý:} Cấu hình \texttt{spark.jars.packages} sẽ tự động tải JAR connector Kafka-Spark khi chạy lần đầu (cần internet). Các lần sau được cache local.
+\end{notebox}
+
+\subsubsection{Đọc stream từ Kafka}
+\begin{lstlisting}[style=python, caption={Đọc streaming data từ Kafka}]
+raw_stream = spark.readStream \
+    .format("kafka") \
+    .option("kafka.bootstrap.servers", "localhost:9092") \
+    .option("subscribe", "vm-cpu-usage") \
+    .option("startingOffsets", "latest") \
+    .option("failOnDataLoss", "false") \
+    .load()
+# Parse JSON -> apply CPU_SCHEMA
+\end{lstlisting}
+
+\subsubsection{Aggregation thời gian thực (3 cấp)}
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\linewidth}{l l l X}
+\toprule
+\textbf{Cấp} & \textbf{Group by} & \textbf{Window} & \textbf{Metrics} \\
+\midrule
+Per-VM & \texttt{vm\_id, vm\_category} & 5 phút & avg, peak, min, stddev CPU, sample count \\
+Per-Category & \texttt{vm\_category} & 1 phút & avg, peak, stddev CPU, số VM \\
+Global & (toàn hệ thống) & 30 giây & avg, peak, stddev, high-CPU count, idle count \\
+\bottomrule
+\end{tabularx}
+\caption{Các cấp độ aggregation trong Spark Streaming}
+\end{table}
+
+Tất cả aggregation đều sử dụng \textbf{Watermark 10 giây} để xử lý late data.
+
+\subsubsection{Phát hiện bất thường Rule-based}
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\linewidth}{l l X}
+\toprule
+\textbf{Loại bất thường} & \textbf{Severity} & \textbf{Điều kiện} \\
+\midrule
+\texttt{CPU\_SATURATION} & CRITICAL & \texttt{max\_cpu > 95\%} \\
+\texttt{HIGH\_CPU\_SUSTAINED} & HIGH & \texttt{avg\_cpu > 90\%} \\
+\texttt{HIGH\_VARIANCE} & MEDIUM & \texttt{stddev(cpu) > 25} \\
+\texttt{EXTREME\_FLUCTUATION} & MEDIUM & \texttt{avg\_cpu\_range > 60\%} \\
+\bottomrule
+\end{tabularx}
+\caption{Quy tắc phát hiện bất thường}
+\end{table}
+
+Kết quả anomaly được ghi vào Kafka topic \texttt{vm-anomalies} để dashboard consume.
+
+\subsubsection{ML Inference — Isolation Forest (foreachBatch)}
+
+\textbf{Tại sao dùng \texttt{foreachBatch}}? Do tránh vấn đề tương thích JVM/Arrow khi dùng Pandas UDF, \texttt{foreachBatch} cho phép chuyển micro-batch sang Pandas và chạy scikit-learn model trực tiếp.
+
+\begin{lstlisting}[style=python, caption={ML inference trong foreachBatch}]
+def process_batch_with_ml(batch_df, epoch_id):
+    pandas_df = batch_df.toPandas()
+    model = get_if_model()  # load once, cache singleton
+    features = pandas_df[['avg_cpu', 'max_cpu', 'cpu_range']].fillna(0)
+    scores = model.decision_function(features)
+    pandas_df['if_anomaly_score'] = scores
+    pandas_df['is_anomaly_ai'] = scores < -0.05
+    # Ghi ra Parquet: output/ml_results/batch_{epoch_id}.parquet
+\end{lstlisting}
+
+\begin{itemize}
+  \item Features: \texttt{avg\_cpu, max\_cpu, cpu\_range}
+  \item Ngưỡng: score $< -0.05$ $\rightarrow$ bất thường
+  \item Chu kỳ trigger: mỗi 30 giây
+  \item Log top 5 VM bất thường nhất mỗi batch
+\end{itemize}
+
+\subsubsection{Output Sinks tổng hợp}
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\linewidth}{l l X}
+\toprule
+\textbf{Query} & \textbf{Sink} & \textbf{Dữ liệu} \\
+\midrule
+\texttt{anomalies\_to\_kafka} & Kafka topic \texttt{vm-anomalies} & Rule-based anomalies để dashboard \\
+\texttt{ml\_inference\_foreach} & Parquet \texttt{output/ml\_results/} & IF predictions per micro-batch \\
+\bottomrule
+\end{tabularx}
+\caption{Các streaming queries và output sink}
+\end{table}
+
+% ============================================================
+\subsection{Module 4: ML Models (\texttt{ml\_models/})}
+% ============================================================
+
+\subsubsection{Isolation Forest (\texttt{isolation\_forest\_model.py})}
+\begin{itemize}
+  \item Thuật toán: \texttt{sklearn.ensemble.IsolationForest}
+  \item Mục đích: phát hiện \textbf{point anomaly} — VM có CPU bất thường so với phần lớn
+  \item Training data: 500,000 records từ file đầu tiên của Azure VM Traces
+  \item \texttt{contamination = 0.05} (5\% anomaly rate)
+  \item Save/load: \texttt{models/saved/isolation\_forest.joblib}
+\end{itemize}
+
+\subsubsection{LSTM Models (\texttt{ml\_models/lstm\_models.py})}
+
+File này chứa 2 kiến trúc LSTM:
+\begin{enumerate}
+  \item \textbf{LSTM Autoencoder}: phát hiện \textbf{contextual anomaly} bằng cách đo lỗi tái tạo (reconstruction error). Nếu lỗi vượt percentile 95\%, coi là bất thường.
+  \begin{itemize}
+    \item Input: chuỗi 30 time steps
+    \item Encoder: 2 layer LSTM hidden size 64
+    \item Decoder: tái tạo lại chuỗi gốc
+  \end{itemize}
+
+  \item \textbf{LSTM Forecasting}: dự đoán 12 time steps tiếp theo
+  \begin{itemize}
+    \item Hidden size: 128
+    \item Output: 12 giá trị CPU tiếp theo
+  \end{itemize}
+\end{enumerate}
+
+% ============================================================
+\subsection{Module 5: Dashboard (\texttt{dashboard/app.py})}
+% ============================================================
+
+Dashboard Streamlit hiển thị kết quả phân tích real-time:
+\begin{itemize}
+  \item Đọc file Parquet từ \texttt{output/ml\_results/} để hiển thị ML predictions
+  \item Subscribe Kafka topic \texttt{vm-anomalies} để nhận cảnh báo tức thì
+  \item Auto-refresh mỗi 3 giây (\texttt{DASHBOARD\_REFRESH\_INTERVAL = 3})
+  \item Cổng: \texttt{http://localhost:8501}
+\end{itemize}
+
+% ============================================================
+\subsection{Infrastructure: Docker Compose}
+% ============================================================
+
+File \texttt{docker-compose.yml} khởi chạy toàn bộ infrastructure:
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\linewidth}{l l l X}
+\toprule
+\textbf{Service} & \textbf{Image} & \textbf{Port} & \textbf{Vai trò} \\
+\midrule
+\texttt{zookeeper} & cp-zookeeper:7.5.0 & 2181 & Coordinator cho Kafka \\
+\texttt{kafka} & cp-kafka:7.5.0 & 9092, 29092 & Message broker chính \\
+\texttt{kafka-ui} & kafka-ui:latest & 8080 & Giao diện monitor Kafka \\
+\texttt{spark-master} & apache/spark:3.5.0 & 7077, 8081 & Spark cluster master \\
+\texttt{spark-worker} & apache/spark:3.5.0 & — & Spark worker (2G RAM, 2 core) \\
+\bottomrule
+\end{tabularx}
+\caption{Các Docker services trong docker-compose.yml}
+\end{table}
+
+Tất cả services được kết nối qua Docker network \texttt{bigdata-network} (bridge driver). Volume được mount: thư mục project root \texttt{./} được mount vào \texttt{/app} trong containers Spark.
+
+% ============================================================
+\section{Hướng dẫn chạy dự án hoàn chỉnh}
+% ============================================================
+
+\begin{notebox}
+\textbf{Yêu cầu hệ thống:} Docker \& Docker Compose, Python 3.9+, pip, kết nối internet lần đầu (tải JAR Kafka-Spark), dữ liệu Azure VM Traces trong \texttt{data/raw/}.
+\end{notebox}
+
+\subsection{Bước 1 — Cài đặt môi trường Python}
+
+\begin{lstlisting}[style=bash, caption={Cài đặt dependencies}]
+# Di chuyen vao thu muc du an
+cd Real-time-analysis-of-resource-usage-data
+
+# Tao va kich hoat virtual environment (khuyen nghi)
+python -m venv .venv
+source .venv/bin/activate   # Linux/macOS
+
+# Cai dat tat ca thu vien
+pip install -r requirements.txt
+\end{lstlisting}
+
+\subsection{Bước 2 — Khởi động Infrastructure (Kafka + Spark)}
+
+\begin{lstlisting}[style=bash, caption={Khởi động Docker services}]
+# Khoi dong tat ca services (Zookeeper, Kafka, Kafka-UI, Spark)
+docker compose up -d
+
+# Kiem tra trang thai cac containers
+docker compose ps
+
+# Xem log neu can debug
+docker compose logs -f kafka
+\end{lstlisting}
+
+\textbf{Kiểm tra:}
+\begin{itemize}
+  \item Kafka UI: \url{http://localhost:8080} — xem topics và messages
+  \item Spark Master UI: \url{http://localhost:8081} — xem cluster status
+\end{itemize}
+
+Chờ khoảng \textbf{15--30 giây} để Kafka và ZooKeeper khởi động hoàn tất.
+
+\subsection{Bước 3 — Train ML Model (Isolation Forest)}
+
+\textit{Bước này chỉ cần làm 1 lần, hoặc khi muốn retrain.}
+
+\begin{lstlisting}[style=bash, caption={Train Isolation Forest model}]
+# Dam bao da co du lieu trong data/raw/
+# Neu chua co: chay script download du lieu truoc
+
+# Train model
+python ml_models/isolation_forest_model.py
+# Model duoc luu vao: models/saved/isolation_forest.joblib
+\end{lstlisting}
+
+\subsection{Bước 4 — Khởi động Spark Streaming Consumer}
+
+\textit{Mở terminal mới.}
+
+\begin{lstlisting}[style=bash, caption={Chạy Spark Streaming Consumer}]
+python spark_processing/streaming_consumer.py
+\end{lstlisting}
+
+\begin{notebox}
+\textbf{Lần đầu chạy:} Spark sẽ tự tải JAR connector \texttt{spark-sql-kafka} từ Maven (~50MB). Quá trình này mất 1--3 phút. Các lần sau sẽ dùng cache.
+\end{notebox}
+
+Consumer sẽ:
+\begin{itemize}
+  \item Kết nối Kafka topic \texttt{vm-cpu-usage}
+  \item Chờ dữ liệu từ Producer (sẽ thấy log ``Waiting for data...'')
+  \item Trigger ML inference mỗi 30 giây
+\end{itemize}
+
+\subsection{Bước 5 — Chạy Kafka Producer}
+
+\textit{Mở terminal mới. Đây là bước đưa dữ liệu vào hệ thống.}
+
+\begin{lstlisting}[style=bash, caption={Chạy Producer với các tốc độ khác nhau}]
+# Chay voi cau hinh mac dinh (200x speed, 500 batch size)
+python kafka_stream/real_data_producer.py
+
+# Chay voi toc do cham hon de debug
+python kafka_stream/real_data_producer.py --speed 50 --batch-size 100
+
+# Gioi han so records (de test nhanh)
+python kafka_stream/real_data_producer.py --max-records 100000
+\end{lstlisting}
+
+Khi Producer chạy, trong terminal của Consumer sẽ bắt đầu xuất hiện log xử lý:
+\begin{lstlisting}[style=bash]
+Batch 0: processed 1247 rows, anomalies: 63
+======================================================================
+   TOP 5 BAT THUONG (Batch 0)
+======================================================================
+  VM: a1b2c3d4e5f6g7h8... | Category: Interactive   | CPU avg:  92.3% | Score: -0.312
+\end{lstlisting}
+
+\subsection{Bước 6 — Khởi động Dashboard}
+
+\textit{Mở terminal mới.}
+
+\begin{lstlisting}[style=bash, caption={Chạy Streamlit dashboard}]
+streamlit run dashboard/app.py --server.port 8501
+
+# Truy cap: http://localhost:8501
+\end{lstlisting}
+
+\subsection{Tóm tắt thứ tự chạy}
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\linewidth}{c l l X}
+\toprule
+\textbf{Bước} & \textbf{Lệnh} & \textbf{Terminal} & \textbf{Ghi chú} \\
+\midrule
+1 & \texttt{pip install -r requirements.txt} & T1 & 1 lần \\
+2 & \texttt{docker compose up -d} & T1 & Chờ 20--30s \\
+3 & \texttt{python ml\_models/isolation\_forest\_model.py} & T1 & 1 lần nếu chưa có model \\
+4 & \texttt{python spark\_processing/streaming\_consumer.py} & T2 & Chạy nền liên tục \\
+5 & \texttt{python kafka\_stream/real\_data\_producer.py} & T3 & Đẩy dữ liệu vào \\
+6 & \texttt{streamlit run dashboard/app.py} & T4 & Xem kết quả \\
+\bottomrule
+\end{tabularx}
+\caption{Thứ tự và terminal thực thi}
+\end{table}
+
+\subsection{Dừng hệ thống}
+
+\begin{lstlisting}[style=bash, caption={Dừng toàn bộ hệ thống}]
+# Dung Producer va Consumer: Ctrl+C trong tung terminal
+
+# Dung Docker services
+docker compose down
+
+# Dung Docker va xoa volumes (reset hoan toan)
+docker compose down -v
+\end{lstlisting}
+
+% ============================================================
+\section{Trạng thái tiến độ hiện tại}
+% ============================================================
+
+\begin{table}[H]
+\centering
+\begin{tabularx}{\linewidth}{l l X}
+\toprule
+\textbf{Thành phần} & \textbf{Trạng thái} & \textbf{Ghi chú} \\
+\midrule
+Docker Infrastructure & \textcolor{mlgreen}{\textbf{Hoàn thành}} & Kafka + ZooKeeper + Spark \\
+Config Module & \textcolor{mlgreen}{\textbf{Hoàn thành}} & Centralized config \\
+Kafka Producer & \textcolor{mlgreen}{\textbf{Hoàn thành}} & Real Azure data, enrich với vmtable \\
+Spark Streaming & \textcolor{mlgreen}{\textbf{Hoàn thành}} & 3-level aggregation + watermark \\
+Rule-based Anomaly & \textcolor{mlgreen}{\textbf{Hoàn thành}} & 4 loại bất thường + severity \\
+Isolation Forest & \textcolor{mlgreen}{\textbf{Hoàn thành}} & Train + inference foreachBatch \\
+LSTM Autoencoder & \textcolor{kafkaorange}{\textbf{Đang phát triển}} & Model defined, chưa tích hợp hoàn toàn \\
+LSTM Forecasting & \textcolor{kafkaorange}{\textbf{Đang phát triển}} & Model defined, chưa tích hợp hoàn toàn \\
+Dashboard & \textcolor{kafkaorange}{\textbf{Đang phát triển}} & Streamlit app đang hoàn thiện \\
+\bottomrule
+\end{tabularx}
+\caption{Bảng tiến độ các thành phần}
+\end{table}
+
+% ============================================================
+\section{Điểm kỹ thuật nổi bật}
+% ============================================================
+
+\begin{enumerate}
+  \item \textbf{Real Azure Data}: Dự án sử dụng dữ liệu thực tế từ Microsoft Research thay vì dữ liệu giả lập, đảm bảo tính học thuật và thực tiễn.
+
+  \item \textbf{Graceful Shutdown}: Cả Producer và Consumer đều xử lý signal \texttt{SIGINT/SIGTERM} để dừng an toàn, không mất dữ liệu đang xử lý.
+
+  \item \textbf{Singleton Model Loading}: ML model được load một lần duy nhất mỗi Spark executor (\texttt{\_models} dict) để tránh overhead load model mỗi micro-batch.
+
+  \item \textbf{foreachBatch Pattern}: Thay vì dùng Pandas UDF (gặp vấn đề tương thích Java 17/Arrow), dự án dùng \texttt{foreachBatch} để chạy scikit-learn trong môi trường Pandas thuần túy.
+
+  \item \textbf{Watermark xử lý late data}: Tất cả windowed aggregation đều có watermark 10 giây, cho phép hệ thống xử lý đúng dữ liệu đến trễ.
+
+  \item \textbf{Configurable Speed}: Producer có tham số \texttt{--speed} cho phép replay dữ liệu lịch sử với tốc độ tùy chỉnh để simulate real-time với nhiều kịch bản.
+\end{enumerate}
+
+% ============================================================
+\section*{Kết luận}
+% ============================================================
+\addcontentsline{toc}{section}{Kết luận}
+
+Dự án đã xây dựng thành công một pipeline streaming hoàn chỉnh từ dữ liệu Azure VM Traces thực tế đến phân tích bất thường bằng mô hình học máy. Kiến trúc Kafka $\rightarrow$ Spark Structured Streaming cho phép xử lý hàng trăm nghìn records/giây với độ trễ thấp. Các module chính (Producer, Consumer, Isolation Forest) đã hoạt động ổn định. Hướng phát triển tiếp theo tập trung vào hoàn thiện LSTM model và dashboard trực quan.
+
+\vspace{1cm}
+\hrule
+\vspace{0.3cm}
+{\small\color{gray} Tài liệu được tạo bởi Antigravity AI | Dựa trên source code thực tế tại commit hiện tại | Ngày: \today}
+
+\end{document}

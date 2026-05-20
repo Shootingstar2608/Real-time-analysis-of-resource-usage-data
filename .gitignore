@@ -14,3 +14,10 @@ __pycache__/
 .env
 venv/
 .venv/
+
+# Large Datasets & Outputs
+data/alibaba/
+output/
+models/saved/
+*.pdf
+*.log
